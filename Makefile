@@ -1,24 +1,26 @@
-.PHONY: build run test vet fmt lint shell clean
+.PHONY: build test vet lint docker-build docker-push clean
+
+BINARY := kinakomate
+IMAGE_REPO := ghcr.io/azuki774/kinakomate
+TAG := $(shell git rev-parse --short HEAD)
 
 build:
-	nix build .
-
-run:
-	nix run .
+	CGO_ENABLED=0 go build -trimpath -o bin/$(BINARY) ./cmd/kinakomate
 
 test:
-	nix develop -c go test ./...
+	go test ./...
 
 vet:
-	nix develop -c go vet ./...
+	go vet ./...
 
-fmt:
-	nix develop -c gofmt -w cmd/kinakomate/main.go
+lint:
+	golangci-lint run ./...
 
-lint: vet
+docker-build:
+	docker build -t $(IMAGE_REPO):$(TAG) .
 
-shell:
-	nix develop
+docker-push: docker-build
+	docker push $(IMAGE_REPO):$(TAG)
 
 clean:
-	rm -f result
+	rm -rf bin
