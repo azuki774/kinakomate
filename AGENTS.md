@@ -19,6 +19,9 @@ kinakomate は misskey 系サービスの運用ツール群を開発するリポ
 ## 実装方針
 
 - **実装言語**: Go（単一バイナリ CLI）。
+- **コンテナイメージ**: マルチステージビルドと distroless な runtime イメージを使用する。
+- **イメージリポジトリ / レジストリ**: `ghcr.io/azuki774/kinakomate`（`ghcr.io`）。`make docker-push` でコミット SHA を tag として push する。
+- **Linter**: `golangci-lint` を使用する。
 - **スコープ**:
   - 本リポジトリは復元・検証ロジック自体（runner）とそのビルド・CI・文書化を扱う。
   - デプロイ対象の作成・変更（CronJob・manifest・RBAC・Secret）、Kubernetes リソースの直接操作、S3 オブジェクトの作成・更新・削除、ネットワークの外部公開、通知送信、ブラウザ／スクリーンショット取得は **runner の責務外**。これらは別のインフラ定義リポジトリ側で管理する。
@@ -28,5 +31,6 @@ kinakomate は misskey 系サービスの運用ツール群を開発するリポ
 
 実装が進むにつれ、以下を追加・更新してください。
 
-- `make lint` / `make test` / `make build`
+- `make lint` / `make test` / `make build` / `make docker-push`
 - `golangci-lint` / `go vet` / `go test`
+- `master` へのマージは CI（lint / vet / test）の必須チェックでブロックする。

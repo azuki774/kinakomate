@@ -24,18 +24,38 @@ kinakomate（きなこメイト）は、[misskey](https://misskey-hub.net/) 系�
 
 ```
 cmd/              # main パッケージ（エントリポイント）
+  kinakomate/    # CLI エントリ、サブコマンドのディスパッチ
 internal/         # 内部実装
   config/         # 入力設定の契約と pre-flight validation
   cluster/        # Kubernetes workload の scale / readiness 制御
   s3/             # S3 ダンプのストリーム取得
-  restore/        # PostgreSQL への復元
+  restore/        # PostgreSQL への復元（restore-test サブコマンド）
   checks/         # 順序付き検証コマンドの実行
   log/            # 構造化ログ
-Dockerfile        # runner イメージ
+Dockerfile        # マルチステージ、distroless runtime イメージ
 Makefile          # build / test / lint / docker-push
+.golangci.yml     # golangci-lint 設定
+.github/workflows # CI（lint / vet / test）
 README.md
 AGENTS.md
 ```
+
+> 上記のうち `cmd/kinakomate`・`internal/restore`・`internal/log` は現在実装済み（scaffold）です。それ以外は以降の Issue で整備します。
+
+## 決定事項
+
+本 Issue（#2）で確定した実装方針は以下の通りです。
+
+| 項目 | 決定 |
+| --- | --- |
+| 実装言語 | Go（単一バイナリ CLI） |
+| コンテナイメージ | マルチステージビルド、distroless を runtime に使用 |
+| イメージリポジトリ | `ghcr.io/azuki774/kinakomate` |
+| レジストリ | `ghcr.io` |
+| Linter | `golangci-lint` |
+| サブコマンド | `restore-test`（リストア検証テスト）を提供 |
+
+イメージは `git rev-parse --short HEAD` 由来のコミット SHA を tag として `ghcr.io/azuki774/kinakomate` へ push します（`make docker-push`）。
 
 ## ドキュメント
 
