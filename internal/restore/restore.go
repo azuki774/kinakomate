@@ -33,9 +33,7 @@ func Run(ctx context.Context, args []string) error {
 
 	logger.InfoContext(ctx, "pre-flight validation passed", configToArgs(cfg.Loggable())...)
 
-	fmt.Println("restore-test: input contract validated (restore steps not yet implemented)")
-
-	return nil
+	return newRunner().run(ctx, cfg)
 }
 
 // configToArgs flattens a map into alternating key/value arguments for
