@@ -1,3 +1,3 @@
 module github.com/azuki774/kinakomate
 
-go 1.26
+go 1.26.7
