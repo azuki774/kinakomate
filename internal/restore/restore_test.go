@@ -7,12 +7,13 @@ import (
 
 func envForRun() map[string]string {
 	return map[string]string{
-		"WORKLOAD": "misskey",
-		"S3_URI":   "https://s3.example.com/backups/misskey",
-		"DB_HOST":  "db",
-		"DB_PORT":  "5432",
-		"DB_USER":  "misskey",
-		"DB_PASS":  "secret",
+		"WEB_WORKLOAD": "misskey-web",
+		"DB_WORKLOAD":  "misskey-db-v18",
+		"S3_URI":       "https://s3.example.com/backups/misskey",
+		"DB_HOST":      "db",
+		"DB_PORT":      "5432",
+		"DB_USER":      "misskey",
+		"DB_PASS":      "secret",
 	}
 }
 
@@ -26,6 +27,15 @@ func TestRun_PreFlightFailsWithoutInput(t *testing.T) {
 func TestRun_PreFlightPassesWithValidInput(t *testing.T) {
 	for k, v := range envForRun() {
 		t.Setenv(k, v)
+	}
+
+	// Substitute a mock runner so the end-to-end flow is exercised without a
+	// real Kubernetes cluster (newRunner builds an in-cluster client).
+	orig := buildRunner
+	t.Cleanup(func() { buildRunner = orig })
+	buildRunner = func() (*runner, error) {
+		dep := &recordingDep{}
+		return &runner{db: dep, s3: dep, k8s: dep, chk: dep}, nil
 	}
 
 	if err := Run(context.Background(), nil); err != nil {

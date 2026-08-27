@@ -33,7 +33,11 @@ func Run(ctx context.Context, args []string) error {
 
 	logger.InfoContext(ctx, "pre-flight validation passed", configToArgs(cfg.Loggable())...)
 
-	return newRunner().run(ctx, cfg)
+	r, err := buildRunner()
+	if err != nil {
+		return err
+	}
+	return r.run(ctx, cfg)
 }
 
 // configToArgs flattens a map into alternating key/value arguments for

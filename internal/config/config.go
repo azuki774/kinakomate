@@ -22,9 +22,15 @@ var workloadNameRegexp = regexp.MustCompile(`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`)
 // only way to populate it. This enforces the "workload name is fixed" invariant
 // — the runner must never derive or mutate these values.
 type Config struct {
-	// Workload is the name of the Kubernetes workload (Deployment/StatefulSet)
-	// that the runner scales during the test. It is fixed and never mutated.
-	Workload string
+	// WebWorkload is the name of the web Kubernetes workload
+	// (Deployment/StatefulSet) that the runner scales during the test.
+	// It is fixed and never mutated.
+	WebWorkload string
+
+	// DBWorkload is the name of the database Kubernetes workload
+	// (Deployment/StatefulSet) that the runner scales during the test.
+	// It is fixed and never mutated.
+	DBWorkload string
 
 	// S3 holds the parsed result of S3_URI.
 	S3Bucket   string
@@ -45,7 +51,8 @@ var requiredEnv = []struct {
 	key   string
 	field string
 }{
-	{"WORKLOAD", "WORKLOAD"},
+	{"WEB_WORKLOAD", "WEB_WORKLOAD"},
+	{"DB_WORKLOAD", "DB_WORKLOAD"},
 	{"S3_URI", "S3_URI"},
 	{"DB_HOST", "DB_HOST"},
 	{"DB_PORT", "DB_PORT"},
@@ -69,8 +76,11 @@ func LoadFromEnv() (*Config, error) {
 		values[r.key] = v
 	}
 
-	if !workloadNameRegexp.MatchString(values["WORKLOAD"]) {
-		return nil, fmt.Errorf("WORKLOAD %q is not a valid RFC 1123 label", values["WORKLOAD"])
+	if !workloadNameRegexp.MatchString(values["WEB_WORKLOAD"]) {
+		return nil, fmt.Errorf("WEB_WORKLOAD %q is not a valid RFC 1123 label", values["WEB_WORKLOAD"])
+	}
+	if !workloadNameRegexp.MatchString(values["DB_WORKLOAD"]) {
+		return nil, fmt.Errorf("DB_WORKLOAD %q is not a valid RFC 1123 label", values["DB_WORKLOAD"])
 	}
 
 	bucket, prefix, endpoint, err := parseS3URI(values["S3_URI"])
@@ -79,15 +89,16 @@ func LoadFromEnv() (*Config, error) {
 	}
 
 	cfg := &Config{
-		Workload:   values["WORKLOAD"],
-		S3Bucket:   bucket,
-		S3Prefix:   prefix,
-		S3Endpoint: endpoint,
-		DBHost:     values["DB_HOST"],
-		DBPort:     values["DB_PORT"],
-		DBUser:     values["DB_USER"],
-		DBPass:     values["DB_PASS"],
-		DBName:     DBName,
+		WebWorkload: values["WEB_WORKLOAD"],
+		DBWorkload:  values["DB_WORKLOAD"],
+		S3Bucket:    bucket,
+		S3Prefix:    prefix,
+		S3Endpoint:  endpoint,
+		DBHost:      values["DB_HOST"],
+		DBPort:      values["DB_PORT"],
+		DBUser:      values["DB_USER"],
+		DBPass:      values["DB_PASS"],
+		DBName:      DBName,
 	}
 	return cfg, nil
 }
@@ -131,13 +142,14 @@ func parseS3URI(raw string) (bucket, prefix, endpoint string, err error) {
 // It omits the secret database password.
 func (c *Config) Loggable() map[string]any {
 	return map[string]any{
-		"workload":    c.Workload,
-		"s3_bucket":   c.S3Bucket,
-		"s3_prefix":   c.S3Prefix,
-		"s3_endpoint": c.S3Endpoint,
-		"db_host":     c.DBHost,
-		"db_port":     c.DBPort,
-		"db_user":     c.DBUser,
-		"db_name":     c.DBName,
+		"web_workload": c.WebWorkload,
+		"db_workload":  c.DBWorkload,
+		"s3_bucket":    c.S3Bucket,
+		"s3_prefix":    c.S3Prefix,
+		"s3_endpoint":  c.S3Endpoint,
+		"db_host":      c.DBHost,
+		"db_port":      c.DBPort,
+		"db_user":      c.DBUser,
+		"db_name":      c.DBName,
 	}
 }
