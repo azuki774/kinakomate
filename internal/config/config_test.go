@@ -18,17 +18,18 @@ func setEnv(t *testing.T, env map[string]string) {
 
 func validEnv() map[string]string {
 	return map[string]string{
-		"WORKLOAD": "misskey",
-		"S3_URI":   "https://s3.example.com/backups/misskey",
-		"DB_HOST":  "db",
-		"DB_PORT":  "5432",
-		"DB_USER":  "misskey",
-		"DB_PASS":  "secret",
+		"WEB_WORKLOAD": "misskey-web",
+		"DB_WORKLOAD":  "misskey-db-v18",
+		"S3_URI":       "https://s3.example.com/backups/misskey",
+		"DB_HOST":      "db",
+		"DB_PORT":      "5432",
+		"DB_USER":      "misskey",
+		"DB_PASS":      "secret",
 	}
 }
 
 func TestLoadFromEnv_MissingRequired(t *testing.T) {
-	for _, missing := range []string{"WORKLOAD", "S3_URI", "DB_HOST", "DB_PORT", "DB_USER", "DB_PASS"} {
+	for _, missing := range []string{"WEB_WORKLOAD", "DB_WORKLOAD", "S3_URI", "DB_HOST", "DB_PORT", "DB_USER", "DB_PASS"} {
 		t.Run(missing, func(t *testing.T) {
 			env := validEnv()
 			delete(env, missing)
@@ -43,17 +44,17 @@ func TestLoadFromEnv_MissingRequired(t *testing.T) {
 
 func TestLoadFromEnv_EmptyRequired(t *testing.T) {
 	env := validEnv()
-	env["WORKLOAD"] = "   "
+	env["WEB_WORKLOAD"] = "   "
 	setEnv(t, env)
 
 	if _, err := LoadFromEnv(); err == nil {
-		t.Fatal("expected error when WORKLOAD is whitespace only")
+		t.Fatal("expected error when WEB_WORKLOAD is whitespace only")
 	}
 }
 
 func TestLoadFromEnv_InvalidWorkload(t *testing.T) {
 	env := validEnv()
-	env["WORKLOAD"] = "Misskey_App"
+	env["DB_WORKLOAD"] = "Misskey_App"
 	setEnv(t, env)
 
 	if _, err := LoadFromEnv(); err == nil {
@@ -69,8 +70,11 @@ func TestLoadFromEnv_Success(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if cfg.Workload != "misskey" {
-		t.Errorf("Workload = %q, want misskey", cfg.Workload)
+	if cfg.WebWorkload != "misskey-web" {
+		t.Errorf("WebWorkload = %q, want misskey-web", cfg.WebWorkload)
+	}
+	if cfg.DBWorkload != "misskey-db-v18" {
+		t.Errorf("DBWorkload = %q, want misskey-db-v18", cfg.DBWorkload)
 	}
 	if cfg.DBName != DBName {
 		t.Errorf("DBName = %q, want %q", cfg.DBName, DBName)
@@ -141,16 +145,20 @@ func TestParseS3URI(t *testing.T) {
 
 func TestConfig_Loggable_OmitsPassword(t *testing.T) {
 	cfg := &Config{
-		Workload: "misskey",
-		S3Bucket: "b",
-		DBPass:   "secret",
-		DBName:   DBName,
+		WebWorkload: "misskey-web",
+		DBWorkload:  "misskey-db-v18",
+		S3Bucket:    "b",
+		DBPass:      "secret",
+		DBName:      DBName,
 	}
 	loggable := cfg.Loggable()
 	if _, ok := loggable["db_pass"]; ok {
 		t.Error("Loggable must not include db_pass")
 	}
-	if loggable["workload"] != "misskey" {
-		t.Error("Loggable should include workload")
+	if loggable["web_workload"] != "misskey-web" {
+		t.Error("Loggable should include web_workload")
+	}
+	if loggable["db_workload"] != "misskey-db-v18" {
+		t.Error("Loggable should include db_workload")
 	}
 }
