@@ -100,7 +100,7 @@ func (o *objectStorage) DownloadAndExtract(ctx context.Context, cfg *config.Conf
 	if err != nil {
 		return nil, fmt.Errorf("S3 GET %s/%s: %w", cfg.S3Bucket, cfg.S3Key, err)
 	}
-	defer out.Body.Close()
+	defer out.Body.Close() //nolint:errcheck
 
 	tmp, err := os.CreateTemp("", "kinakomate-dump-*.sql.gz")
 	if err != nil {
@@ -167,13 +167,13 @@ func validateGzipStream(path string) error {
 	if err != nil {
 		return fmt.Errorf("open temp dump for validation: %w", err)
 	}
-	defer f.Close()
+	defer f.Close() //nolint:errcheck
 
 	zr, err := gzip.NewReader(f)
 	if err != nil {
 		return fmt.Errorf("invalid gzip stream: %w", err)
 	}
-	defer zr.Close()
+	defer zr.Close() //nolint:errcheck
 
 	if _, err := io.Copy(io.Discard, zr); err != nil {
 		return fmt.Errorf("gzip stream truncated or corrupt: %w", err)
