@@ -3,6 +3,7 @@ package restore
 import (
 	"context"
 	"errors"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -23,12 +24,15 @@ func (d *recordingDep) CheckConnection(_ context.Context, _ *config.Config) erro
 	return d.failOn["check"]
 }
 
-func (d *recordingDep) DownloadAndExtract(_ context.Context, _ *config.Config) error {
+func (d *recordingDep) DownloadAndExtract(_ context.Context, _ *config.Config) (*Dump, error) {
 	d.calls = append(d.calls, "s3-download")
-	return d.failOn["s3-download"]
+	return d.dump(), d.failOn["s3-download"]
 }
 
-func (d *recordingDep) Restore(_ context.Context, _ *config.Config) error {
+func (d *recordingDep) Restore(_ context.Context, _ *config.Config, dump *Dump) error {
+	if dump == nil {
+		return errors.New("restore called without a dump")
+	}
 	d.calls = append(d.calls, "db-restore")
 	return d.failOn["db-restore"]
 }
@@ -55,6 +59,16 @@ func (d *recordingDep) WaitForReplicas(_ context.Context, _ *config.Config, work
 func (d *recordingDep) Run(_ context.Context, _ *config.Config) error {
 	d.calls = append(d.calls, "checks")
 	return d.failOn["checks"]
+}
+
+// dump returns a Dump backed by a real temp file so Dump.Cleanup behaves.
+func (d *recordingDep) dump() *Dump {
+	f, err := os.CreateTemp("", "kinakomate-dump-*.sql.gz")
+	if err != nil {
+		return &Dump{Path: ""}
+	}
+	f.Close() //nolint:errcheck
+	return &Dump{Path: f.Name(), Bucket: "b", Key: "k"}
 }
 
 func itoa(n int) string {

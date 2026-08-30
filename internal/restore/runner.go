@@ -17,23 +17,20 @@ const scaleTimeout = 5 * time.Minute
 const scalePollInterval = 2 * time.Second
 
 // Database abstracts the misskey database operations the runner needs.
-//
-// The restore step (issue #5) and the connection check fill these in later.
 type Database interface {
 	// CheckConnection verifies the runner can reach the target database.
 	CheckConnection(ctx context.Context, cfg *config.Config) error
 	// Restore restores the downloaded dump into the database.
-	Restore(ctx context.Context, cfg *config.Config) error
+	Restore(ctx context.Context, cfg *config.Config, dump *Dump) error
 }
 
 // ObjectStorage abstracts the S3 operations the runner needs.
-//
-// The download + decompress step (issue #5) fills this in later.
 type ObjectStorage interface {
 	// CheckConnection verifies the runner can reach the object storage.
 	CheckConnection(ctx context.Context, cfg *config.Config) error
-	// DownloadAndExtract fetches and decompresses the dump.
-	DownloadAndExtract(ctx context.Context, cfg *config.Config) error
+	// DownloadAndExtract fetches and validates the gzip dump, staging it on
+	// disk, and returns a handle the caller must later clean up.
+	DownloadAndExtract(ctx context.Context, cfg *config.Config) (*Dump, error)
 }
 
 // Kubernetes abstracts the workload scaling the runner needs.
@@ -67,22 +64,21 @@ type runner struct {
 	chk Checks
 }
 
-// buildRunner constructs the production runner. It is a package-level variable
-// so tests can substitute a mock runner without reaching a real cluster.
-var buildRunner = func() (*runner, error) {
-	return newRunner()
-}
-
-// newRunner builds a runner with the real Kubernetes client and placeholder
-// no-op dependencies for the steps implemented in later issues.
-func newRunner() (*runner, error) {
+// newRunner builds a runner wired to the real dependencies: the Kubernetes
+// client (issue #4) plus object storage and database (issue #5). The checks
+// dependency is a placeholder (issue #7) that no-ops for now.
+func newRunner(ctx context.Context, cfg *config.Config) (*runner, error) {
 	k8s, err := newKubernetesClient()
 	if err != nil {
 		return nil, fmt.Errorf("failed to initialize kubernetes client: %w", err)
 	}
+	s3, err := newObjectStorage(ctx, cfg)
+	if err != nil {
+		return nil, err
+	}
 	return &runner{
-		db:  databaseTODO{},
-		s3:  objectStorageTODO{},
+		db:  newDatabase(),
+		s3:  s3,
 		k8s: k8s,
 		chk: checksTODO{},
 	}, nil
@@ -94,18 +90,19 @@ func newRunner() (*runner, error) {
 //  2. S3 connection check
 //  3. Kubernetes API connection check
 //  4. record current replica counts (for audit / recovery)
-//  5. S3 download + decompress
+//  5. S3 download + decompress (stages the gzip dump on disk)
 //  6. T1: scale web to 0, db to 1
 //  7. wait for web replicas to reach 0
-//  8. DB restore
+//  8. DB restore (streams the gzip into psql, single transaction)
 //  9. T2: scale web to 1
+//
 // 10. checks
 // 11. T3 (cleanup): scale web to 0, db to 0
 //
 // On the first error it stops immediately and returns the wrapped error; the
-// remaining steps are not executed. A deferred rollback scales web back to 0
-// on failure (the azkey/web workload is the one that must never stay up after a
-// failed run).
+// remaining steps are not executed and the staged dump is removed. A deferred
+// rollback scales web back to 0 on failure (the azkey/web workload is the one
+// that must never stay up after a failed run).
 func (r *runner) run(ctx context.Context, cfg *config.Config) error {
 	logger := log.New()
 
@@ -132,11 +129,16 @@ func (r *runner) run(ctx context.Context, cfg *config.Config) error {
 		fn   func(context.Context, *config.Config) error
 	}
 
+	var dump *Dump
 	steps := []step{
 		{"db connection check", r.db.CheckConnection},
 		{"s3 connection check", r.s3.CheckConnection},
 		{"kubernetes api connection check", r.k8s.CheckConnection},
-		{"s3 download + decompress", r.s3.DownloadAndExtract},
+		{"s3 download + decompress", func(ctx context.Context, cfg *config.Config) error {
+			var err error
+			dump, err = r.s3.DownloadAndExtract(ctx, cfg)
+			return err
+		}},
 		{"scale web to 0", func(ctx context.Context, cfg *config.Config) error {
 			return r.k8s.Scale(ctx, cfg, cfg.WebWorkload, 0)
 		}},
@@ -146,7 +148,9 @@ func (r *runner) run(ctx context.Context, cfg *config.Config) error {
 		{"wait web replicas 0", func(ctx context.Context, cfg *config.Config) error {
 			return r.k8s.WaitForReplicas(ctx, cfg, cfg.WebWorkload, 0, scaleTimeout)
 		}},
-		{"db restore", r.db.Restore},
+		{"db restore", func(ctx context.Context, cfg *config.Config) error {
+			return r.db.Restore(ctx, cfg, dump)
+		}},
 		{"scale web to 1", func(ctx context.Context, cfg *config.Config) error {
 			return r.k8s.Scale(ctx, cfg, cfg.WebWorkload, 1)
 		}},
@@ -162,11 +166,13 @@ func (r *runner) run(ctx context.Context, cfg *config.Config) error {
 	for _, s := range steps {
 		logger.InfoContext(ctx, "restore-test step start", "step", s.name)
 		if err := s.fn(ctx, cfg); err != nil {
+			dump.Cleanup()
 			return fmt.Errorf("restore-test step %q failed: %w", s.name, err)
 		}
 		logger.InfoContext(ctx, "restore-test step done", "step", s.name)
 	}
 
+	dump.Cleanup()
 	failed = false
 	return nil
 }
@@ -183,32 +189,6 @@ func (r *runner) recordReplicas(ctx context.Context, cfg *config.Config) {
 		}
 		logger.InfoContext(ctx, "current replicas", "workload", w, "replicas", n)
 	}
-}
-
-// databaseTODO is a placeholder Database dependency. Real logic lands in issue #5.
-type databaseTODO struct{}
-
-func (databaseTODO) CheckConnection(_ context.Context, _ *config.Config) error {
-	// TODO: implement misskey DB connection check.
-	return nil
-}
-
-func (databaseTODO) Restore(_ context.Context, _ *config.Config) error {
-	// TODO: implement DB restore.
-	return nil
-}
-
-// objectStorageTODO is a placeholder ObjectStorage dependency. Real logic lands in issue #5.
-type objectStorageTODO struct{}
-
-func (objectStorageTODO) CheckConnection(_ context.Context, _ *config.Config) error {
-	// TODO: implement S3 connection check.
-	return nil
-}
-
-func (objectStorageTODO) DownloadAndExtract(_ context.Context, _ *config.Config) error {
-	// TODO: implement S3 download + decompress.
-	return nil
 }
 
 // checksTODO is a placeholder Checks dependency. Real logic lands in issue #7.

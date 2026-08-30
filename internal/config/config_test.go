@@ -20,7 +20,9 @@ func validEnv() map[string]string {
 	return map[string]string{
 		"WEB_WORKLOAD": "misskey-web",
 		"DB_WORKLOAD":  "misskey-db-v18",
-		"S3_URI":       "https://s3.example.com/backups/misskey",
+		"S3_REGION":    "us-east-1",
+		"S3_BUCKET":    "backups",
+		"S3_KEY":       "misskey/daily/dump.sql.gz",
 		"DB_HOST":      "db",
 		"DB_PORT":      "5432",
 		"DB_USER":      "misskey",
@@ -29,7 +31,10 @@ func validEnv() map[string]string {
 }
 
 func TestLoadFromEnv_MissingRequired(t *testing.T) {
-	for _, missing := range []string{"WEB_WORKLOAD", "DB_WORKLOAD", "S3_URI", "DB_HOST", "DB_PORT", "DB_USER", "DB_PASS"} {
+	for _, missing := range []string{
+		"WEB_WORKLOAD", "DB_WORKLOAD", "S3_REGION", "S3_BUCKET", "S3_KEY",
+		"DB_HOST", "DB_PORT", "DB_USER", "DB_PASS",
+	} {
 		t.Run(missing, func(t *testing.T) {
 			env := validEnv()
 			delete(env, missing)
@@ -62,6 +67,41 @@ func TestLoadFromEnv_InvalidWorkload(t *testing.T) {
 	}
 }
 
+func TestLoadFromEnv_InvalidEndpoint(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		endpoint string
+	}{
+		{name: "no scheme", endpoint: "s3.example.com"},
+		{name: "bad scheme", endpoint: "ftp://s3.example.com"},
+		{name: "no host", endpoint: "https://"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			env := validEnv()
+			env["S3_ENDPOINT"] = tc.endpoint
+			setEnv(t, env)
+
+			if _, err := LoadFromEnv(); err == nil {
+				t.Fatalf("expected error for S3_ENDPOINT %q", tc.endpoint)
+			}
+		})
+	}
+}
+
+func TestLoadFromEnv_EmptyEndpointAllowed(t *testing.T) {
+	env := validEnv()
+	env["S3_ENDPOINT"] = ""
+	setEnv(t, env)
+
+	cfg, err := LoadFromEnv()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.S3Endpoint != "" {
+		t.Errorf("S3Endpoint = %q, want empty (AWS default)", cfg.S3Endpoint)
+	}
+}
+
 func TestLoadFromEnv_Success(t *testing.T) {
 	env := validEnv()
 	setEnv(t, env)
@@ -79,67 +119,9 @@ func TestLoadFromEnv_Success(t *testing.T) {
 	if cfg.DBName != DBName {
 		t.Errorf("DBName = %q, want %q", cfg.DBName, DBName)
 	}
-}
-
-func TestParseS3URI(t *testing.T) {
-	cases := []struct {
-		name     string
-		raw      string
-		bucket   string
-		prefix   string
-		endpoint string
-		wantErr  bool
-	}{
-		{
-			name:     "s3 scheme with prefix",
-			raw:      "s3://mybucket/misskey/daily",
-			bucket:   "mybucket",
-			prefix:   "misskey/daily",
-			endpoint: "",
-		},
-		{
-			name:     "s3 scheme no prefix",
-			raw:      "s3://mybucket",
-			bucket:   "mybucket",
-			prefix:   "",
-			endpoint: "",
-		},
-		{
-			name:     "https compatible with prefix",
-			raw:      "https://s3.example.com/backups/misskey",
-			bucket:   "backups",
-			prefix:   "misskey",
-			endpoint: "https://s3.example.com",
-		},
-		{
-			name:    "no scheme errors",
-			raw:     "mybucket/misskey",
-			wantErr: true,
-		},
-		{
-			name:    "no bucket errors",
-			raw:     "s3://",
-			wantErr: true,
-		},
-	}
-
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			bucket, prefix, endpoint, err := parseS3URI(tc.raw)
-			if tc.wantErr {
-				if err == nil {
-					t.Fatalf("expected error for %q", tc.raw)
-				}
-				return
-			}
-			if err != nil {
-				t.Fatalf("unexpected error: %v", err)
-			}
-			if bucket != tc.bucket || prefix != tc.prefix || endpoint != tc.endpoint {
-				t.Errorf("parseS3URI(%q) = (%q,%q,%q), want (%q,%q,%q)",
-					tc.raw, bucket, prefix, endpoint, tc.bucket, tc.prefix, tc.endpoint)
-			}
-		})
+	if cfg.S3Bucket != "backups" || cfg.S3Key != "misskey/daily/dump.sql.gz" {
+		t.Errorf("S3 = (%q,%q), want (backups, misskey/daily/dump.sql.gz)",
+			cfg.S3Bucket, cfg.S3Key)
 	}
 }
 
