@@ -21,6 +21,11 @@ var workloadNameRegexp = regexp.MustCompile(`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`)
 // It is immutable by construction: there are no setters and LoadFromEnv is the
 // only way to populate it. This enforces the "workload name is fixed" invariant
 // — the runner must never derive or mutate these values.
+//
+// S3 credentials are intentionally NOT held here. The runner reads them from
+// the standard AWS SDK credential chain (AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY,
+// AWS_SESSION_TOKEN) which the deploy-time manifest injects; Config only carries
+// the endpoint/region/bucket/key that locate the fixed backup object.
 type Config struct {
 	// WebWorkload is the name of the web Kubernetes workload
 	// (Deployment/StatefulSet) that the runner scales during the test.
@@ -32,10 +37,17 @@ type Config struct {
 	// It is fixed and never mutated.
 	DBWorkload string
 
-	// S3 holds the parsed result of S3_URI.
-	S3Bucket   string
-	S3Prefix   string
+	// S3Endpoint is the endpoint used for the fixed backup object. Empty means
+	// the AWS default endpoint; a non-empty value targets an S3-compatible
+	// server and is accessed in path-style.
 	S3Endpoint string
+	// S3Region is the AWS region (or S3-compatible region) of the bucket.
+	S3Region string
+	// S3Bucket is the bucket holding the fixed backup object.
+	S3Bucket string
+	// S3Key is the fixed object key of the gzip dump (generation is never
+	// chosen; only this exact key is fetched).
+	S3Key string
 
 	// DB holds the database connection inputs.
 	DBHost string
@@ -53,7 +65,9 @@ var requiredEnv = []struct {
 }{
 	{"WEB_WORKLOAD", "WEB_WORKLOAD"},
 	{"DB_WORKLOAD", "DB_WORKLOAD"},
-	{"S3_URI", "S3_URI"},
+	{"S3_REGION", "S3_REGION"},
+	{"S3_BUCKET", "S3_BUCKET"},
+	{"S3_KEY", "S3_KEY"},
 	{"DB_HOST", "DB_HOST"},
 	{"DB_PORT", "DB_PORT"},
 	{"DB_USER", "DB_USER"},
@@ -83,17 +97,19 @@ func LoadFromEnv() (*Config, error) {
 		return nil, fmt.Errorf("DB_WORKLOAD %q is not a valid RFC 1123 label", values["DB_WORKLOAD"])
 	}
 
-	bucket, prefix, endpoint, err := parseS3URI(values["S3_URI"])
-	if err != nil {
+	// S3_ENDPOINT is optional: empty selects the AWS default endpoint.
+	s3Endpoint := strings.TrimSpace(os.Getenv("S3_ENDPOINT"))
+	if err := validateS3Endpoint(s3Endpoint); err != nil {
 		return nil, err
 	}
 
 	cfg := &Config{
 		WebWorkload: values["WEB_WORKLOAD"],
 		DBWorkload:  values["DB_WORKLOAD"],
-		S3Bucket:    bucket,
-		S3Prefix:    prefix,
-		S3Endpoint:  endpoint,
+		S3Endpoint:  s3Endpoint,
+		S3Region:    values["S3_REGION"],
+		S3Bucket:    values["S3_BUCKET"],
+		S3Key:       values["S3_KEY"],
 		DBHost:      values["DB_HOST"],
 		DBPort:      values["DB_PORT"],
 		DBUser:      values["DB_USER"],
@@ -103,39 +119,23 @@ func LoadFromEnv() (*Config, error) {
 	return cfg, nil
 }
 
-// parseS3URI parses an S3 location into its bucket, prefix, and endpoint.
-//
-// Supported forms:
-//   - s3://bucket/prefix            (AWS; endpoint resolved by the SDK later)
-//   - https://endpoint/bucket/prefix (S3-compatible; endpoint is explicit)
-//   - http://endpoint/bucket/prefix
-func parseS3URI(raw string) (bucket, prefix, endpoint string, err error) {
+// validateS3Endpoint rejects a clearly malformed endpoint. The empty string is
+// allowed and selects the AWS default endpoint.
+func validateS3Endpoint(raw string) error {
+	if raw == "" {
+		return nil
+	}
 	u, err := url.Parse(raw)
 	if err != nil {
-		return "", "", "", fmt.Errorf("S3_URI %q is not a valid URI: %w", raw, err)
+		return fmt.Errorf("S3_ENDPOINT %q is not a valid URL: %w", raw, err)
 	}
-
-	switch u.Scheme {
-	case "s3":
-		endpoint = ""
-		bucket = u.Host
-		prefix = strings.TrimPrefix(u.Path, "/")
-	case "http", "https":
-		endpoint = u.Scheme + "://" + u.Host
-		path := strings.TrimPrefix(u.Path, "/")
-		parts := strings.SplitN(path, "/", 2)
-		bucket = parts[0]
-		if len(parts) == 2 {
-			prefix = strings.TrimPrefix(parts[1], "/")
-		}
-	default:
-		return "", "", "", fmt.Errorf("S3_URI %q has unsupported scheme %q (want s3, http, or https)", raw, u.Scheme)
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return fmt.Errorf("S3_ENDPOINT %q must use http or https scheme", raw)
 	}
-
-	if bucket == "" {
-		return "", "", "", fmt.Errorf("S3_URI %q does not contain a bucket", raw)
+	if u.Host == "" {
+		return fmt.Errorf("S3_ENDPOINT %q must include a host", raw)
 	}
-	return bucket, prefix, endpoint, nil
+	return nil
 }
 
 // Loggable returns the config as a map suitable for structured logging.
@@ -144,9 +144,10 @@ func (c *Config) Loggable() map[string]any {
 	return map[string]any{
 		"web_workload": c.WebWorkload,
 		"db_workload":  c.DBWorkload,
-		"s3_bucket":    c.S3Bucket,
-		"s3_prefix":    c.S3Prefix,
 		"s3_endpoint":  c.S3Endpoint,
+		"s3_region":    c.S3Region,
+		"s3_bucket":    c.S3Bucket,
+		"s3_key":       c.S3Key,
 		"db_host":      c.DBHost,
 		"db_port":      c.DBPort,
 		"db_user":      c.DBUser,

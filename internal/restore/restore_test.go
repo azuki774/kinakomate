@@ -3,18 +3,29 @@ package restore
 import (
 	"context"
 	"testing"
+
+	"github.com/azuki774/kinakomate/internal/config"
 )
 
 func envForRun() map[string]string {
 	return map[string]string{
 		"WEB_WORKLOAD": "misskey-web",
 		"DB_WORKLOAD":  "misskey-db-v18",
-		"S3_URI":       "https://s3.example.com/backups/misskey",
+		"S3_REGION":    "us-east-1",
+		"S3_BUCKET":    "backups",
+		"S3_KEY":       "misskey/daily/dump.sql.gz",
 		"DB_HOST":      "db",
 		"DB_PORT":      "5432",
 		"DB_USER":      "misskey",
 		"DB_PASS":      "secret",
 	}
+}
+
+// noopRunner returns a runner wired to recordingNoop deps so Run exercises the
+// workflow without touching real S3 or Kubernetes or PostgreSQL.
+func noopRunner(_ context.Context, _ *config.Config) (*runner, error) {
+	dep := &recordingDep{}
+	return &runner{db: dep, s3: dep, k8s: dep, chk: dep}, nil
 }
 
 func TestRun_PreFlightFailsWithoutInput(t *testing.T) {
@@ -29,14 +40,11 @@ func TestRun_PreFlightPassesWithValidInput(t *testing.T) {
 		t.Setenv(k, v)
 	}
 
-	// Substitute a mock runner so the end-to-end flow is exercised without a
-	// real Kubernetes cluster (newRunner builds an in-cluster client).
-	orig := buildRunner
-	t.Cleanup(func() { buildRunner = orig })
-	buildRunner = func() (*runner, error) {
-		dep := &recordingDep{}
-		return &runner{db: dep, s3: dep, k8s: dep, chk: dep}, nil
-	}
+	// Substitute a faked runner so the workflow is exercised without a real
+	// Kubernetes cluster or S3 bucket / PostgreSQL server.
+	orig := runnerFactory
+	t.Cleanup(func() { runnerFactory = orig })
+	runnerFactory = noopRunner
 
 	if err := Run(context.Background(), nil); err != nil {
 		t.Fatalf("Run returned unexpected error: %v", err)

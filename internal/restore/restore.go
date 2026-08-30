@@ -33,11 +33,17 @@ func Run(ctx context.Context, args []string) error {
 
 	logger.InfoContext(ctx, "pre-flight validation passed", configToArgs(cfg.Loggable())...)
 
-	r, err := buildRunner()
+	r, err := runnerFactory(ctx, cfg)
 	if err != nil {
-		return err
+		return fmt.Errorf("initialize runner: %w", err)
 	}
 	return r.run(ctx, cfg)
+}
+
+// runnerFactory builds a runner with the real dependencies. It is a variable so
+// tests can substitute a runner backed by fakes and keep the run hermetic.
+var runnerFactory = func(ctx context.Context, cfg *config.Config) (*runner, error) {
+	return newRunner(ctx, cfg)
 }
 
 // configToArgs flattens a map into alternating key/value arguments for
