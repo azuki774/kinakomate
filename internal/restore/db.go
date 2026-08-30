@@ -62,13 +62,13 @@ func (d *database) Restore(ctx context.Context, cfg *config.Config, dump *Dump) 
 	if err != nil {
 		return fmt.Errorf("open staged gzip dump: %w", err)
 	}
-	defer f.Close()
+	defer f.Close() //nolint:errcheck
 
 	zr, err := gzip.NewReader(f)
 	if err != nil {
 		return fmt.Errorf("open gzip stream: %w", err)
 	}
-	defer zr.Close()
+	defer zr.Close() //nolint:errcheck
 
 	// psql reads the SQL from stdin; --set ON_ERROR_STOP=1 + --single-transaction
 	// make it stop and ROLLBACK the whole dump on the first error. The gzip
