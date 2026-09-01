@@ -29,6 +29,11 @@ func (d *recordingDep) DownloadAndExtract(_ context.Context, _ *config.Config) (
 	return d.dump(), d.failOn["s3-download"]
 }
 
+func (d *recordingDep) Reset(_ context.Context, _ *config.Config) error {
+	d.calls = append(d.calls, "db-reset")
+	return d.failOn["db-reset"]
+}
+
 func (d *recordingDep) Restore(_ context.Context, _ *config.Config, dump *Dump) error {
 	if dump == nil {
 		return errors.New("restore called without a dump")
@@ -103,6 +108,7 @@ func TestRunnerRun_Order(t *testing.T) {
 		"scale:misskey-web:0",
 		"scale:misskey-db-v18:1",
 		"wait:misskey-web:0",
+		"db-reset",
 		"db-restore",
 		"scale:misskey-web:1",
 		"checks",
@@ -126,6 +132,28 @@ func TestRunnerRun_Order(t *testing.T) {
 	for i := range wantReplicas {
 		if dep.scaleReplicas[i] != wantReplicas[i] {
 			t.Fatalf("scaleReplicas[%d] = %d, want %d (full: %v)", i, dep.scaleReplicas[i], wantReplicas[i], dep.scaleReplicas)
+		}
+	}
+}
+
+func TestRunnerRun_StopsOnResetFailure(t *testing.T) {
+	dep := &recordingDep{failOn: map[string]error{"db-reset": errors.New("reset boom")}}
+	r := &runner{db: dep, s3: dep, k8s: dep, chk: dep}
+
+	err := r.run(context.Background(), testConfig())
+	if err == nil {
+		t.Fatal("expected run to fail when database reset fails")
+	}
+	if !strings.Contains(err.Error(), "reset database") {
+		t.Fatalf("error = %v, want it to mention reset database", err)
+	}
+
+	// After a reset failure the restore must never run; the web must be rolled
+	// back to 0 (via deferred rollback) and scale-to-1, checks, and cleanup
+	// must never run.
+	for _, c := range dep.calls {
+		if c == "db-restore" || c == "scale:misskey-web:1" || c == "checks" || c == "scale:misskey-db-v18:0" {
+			t.Fatalf("calls = %v, unexpected call %q after reset failure", dep.calls, c)
 		}
 	}
 }
