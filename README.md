@@ -15,7 +15,8 @@
 
 | 変数 | 必須 | 説明 |
 |---|---|---|
-| `WORKLOAD` | yes | 対象となる Kubernetes workload 名（RFC 1123 label） |
+| `WEB_WORKLOAD` | yes | スケール制御対象の web Kubernetes workload 名（RFC 1123 label） |
+| `DB_WORKLOAD` | yes | スケール制御対象の db Kubernetes workload 名（RFC 1123 label） |
 | `S3_REGION` | yes | バックアップ bucket のリージョン |
 | `S3_BUCKET` | yes | 固定バックアップ object を含む bucket |
 | `S3_KEY` | yes | 固定バックアップ object の key（世代選択はしない固定 key のみ取得） |
@@ -24,6 +25,25 @@
 | `DB_PORT` | yes | 復元先 PostgreSQL の port |
 | `DB_USER` | yes | 復元先 PostgreSQL の user |
 | `DB_PASS` | yes | 復元先 PostgreSQL の password（ログに出さない） |
+
+復元先のデータベース名は固定値 `misskey` です（環境変数では指定しません）。
+
+## データベースの再作成（リストア前の初期化）
+
+プレーン SQL のダンプには既存オブジェクトを消す `--clean` 相当の処理がないため、
+runner はリストアの直前に必ず対象データベースを作り直します。接続先は
+maintenance database の `postgres` で、次の順に実行します。
+
+1. 対象データベースへの残存接続を `pg_terminate_backend` で切断
+2. `DROP DATABASE IF EXISTS misskey;`
+3. `CREATE DATABASE misskey TEMPLATE template0;`（`DB_USER` が owner になる）
+
+その後に gzip ダンプを `psql --single-transaction --set ON_ERROR_STOP=1` で
+流し込みます。この初期化は対象データベースを完全に置き換える破壊的操作のため、
+runner を向けた環境では対象 DB 内のデータは常に失われます。
+
+必要な権限: `DB_USER` は `postgres` maintenance database に接続でき、かつ
+対象データベースの ownership と `CREATEDB` 権限を持つ必要があります。
 
 ## S3 認証情報の依存
 

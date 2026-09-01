@@ -18,8 +18,11 @@ const scalePollInterval = 2 * time.Second
 
 // Database abstracts the misskey database operations the runner needs.
 type Database interface {
-	// CheckConnection verifies the runner can reach the target database.
+	// CheckConnection verifies the runner can reach the PostgreSQL server.
 	CheckConnection(ctx context.Context, cfg *config.Config) error
+	// Reset recreates the target database from template0 so the restore
+	// always starts from an empty database.
+	Reset(ctx context.Context, cfg *config.Config) error
 	// Restore restores the downloaded dump into the database.
 	Restore(ctx context.Context, cfg *config.Config, dump *Dump) error
 }
@@ -93,11 +96,14 @@ func newRunner(ctx context.Context, cfg *config.Config) (*runner, error) {
 //  5. S3 download + decompress (stages the gzip dump on disk)
 //  6. T1: scale web to 0, db to 1
 //  7. wait for web replicas to reach 0
-//  8. DB restore (streams the gzip into psql, single transaction)
-//  9. T2: scale web to 1
+//  8. reset database (terminate backends, DROP IF EXISTS, CREATE from
+//     template0 — a plain SQL dump does not clean the target itself)
+//  9. DB restore (streams the gzip into psql, single transaction)
 //
-// 10. checks
-// 11. T3 (cleanup): scale web to 0, db to 0
+// 10. T2: scale web to 1
+//
+// 11. checks
+// 12. T3 (cleanup): scale web to 0, db to 0
 //
 // On the first error it stops immediately and returns the wrapped error; the
 // remaining steps are not executed and the staged dump is removed. A deferred
@@ -148,6 +154,7 @@ func (r *runner) run(ctx context.Context, cfg *config.Config) error {
 		{"wait web replicas 0", func(ctx context.Context, cfg *config.Config) error {
 			return r.k8s.WaitForReplicas(ctx, cfg, cfg.WebWorkload, 0, scaleTimeout)
 		}},
+		{"reset database", r.db.Reset},
 		{"db restore", func(ctx context.Context, cfg *config.Config) error {
 			return r.db.Restore(ctx, cfg, dump)
 		}},
