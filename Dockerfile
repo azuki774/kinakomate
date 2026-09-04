@@ -40,7 +40,7 @@ RUN set -eux; \
 # The runner invokes psql directly (ON_ERROR_STOP + single transaction), so the
 # runtime image must include psql. We start from a glibc-based distroless base
 # (psql is dynamically linked) and copy the staged binary + libraries in.
-FROM gcr.io/distroless/base-debian12:nonroot AS runtime
+FROM gcr.io/distroless/base-debian13:nonroot AS runtime
 
 COPY --from=build /out/kinakomate /usr/bin/kinakomate
 COPY --from=psql /staging/usr/bin/psql /usr/bin/psql
