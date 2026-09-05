@@ -28,6 +28,31 @@
 
 復元先のデータベース名は固定値 `misskey` です（環境変数では指定しません）。
 
+## Kubernetes RBAC
+
+Kubernetes の標準 ServiceAccount 権限では workload の参照や replica 数の変更は
+できません。`restore-test` の実行用 ServiceAccount には、対象 workload と同じ
+namespace で次の権限を追加してください。`resourceNames` は各環境の
+`WEB_WORKLOAD` と `DB_WORKLOAD` の値に置き換えます。
+
+```yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: kinakomate-restore-test
+rules:
+  - apiGroups: ["apps"]
+    resources: ["deployments", "statefulsets"]
+    resourceNames:
+      - "<WEB_WORKLOAD の値>"
+      - "<DB_WORKLOAD の値>"
+    verbs: ["get", "update"]
+```
+
+この `Role` を実行用 ServiceAccount に割り当てる `RoleBinding` は、CronJob などと
+同様にデプロイ先のインフラ定義で管理してください。runner は Kubernetes API から
+Secret を取得しないため、`secrets` に対する権限は不要です。
+
 ## データベースの再作成（リストア前の初期化）
 
 プレーン SQL のダンプには既存オブジェクトを消す `--clean` 相当の処理がないため、
