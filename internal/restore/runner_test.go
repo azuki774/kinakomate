@@ -17,6 +17,8 @@ type recordingDep struct {
 	calls         []string
 	failOn        map[string]error
 	scaleReplicas []int
+	waitTimeouts  []time.Duration
+	apiTimeout    time.Duration
 }
 
 func (d *recordingDep) CheckConnection(_ context.Context, _ *config.Config) error {
@@ -56,14 +58,21 @@ func (d *recordingDep) Scale(_ context.Context, _ *config.Config, workload strin
 	return d.failOn["scale:"+workload+":"+itoa(replicas)]
 }
 
-func (d *recordingDep) WaitForReplicas(_ context.Context, _ *config.Config, workload string, want int, _ time.Duration) error {
+func (d *recordingDep) WaitForReplicas(_ context.Context, _ *config.Config, workload string, want int, timeout time.Duration) error {
 	d.calls = append(d.calls, "wait:"+workload+":"+itoa(want))
+	d.waitTimeouts = append(d.waitTimeouts, timeout)
 	return d.failOn["wait:"+workload+":"+itoa(want)]
 }
 
-func (d *recordingDep) Run(_ context.Context, _ *config.Config) error {
-	d.calls = append(d.calls, "checks")
-	return d.failOn["checks"]
+func (d *recordingDep) WaitForReadiness(_ context.Context, _ *config.Config, timeout time.Duration) error {
+	d.calls = append(d.calls, "misskey-readiness")
+	d.apiTimeout = timeout
+	return d.failOn["misskey-readiness"]
+}
+
+func (d *recordingDep) CheckGlobalTimeline(_ context.Context, _ *config.Config) error {
+	d.calls = append(d.calls, "misskey-global-timeline")
+	return d.failOn["misskey-global-timeline"]
 }
 
 // dump returns a Dump backed by a real temp file so Dump.Cleanup behaves.
@@ -87,12 +96,17 @@ func itoa(n int) string {
 }
 
 func testConfig() *config.Config {
-	return &config.Config{WebWorkload: "misskey-web", DBWorkload: "misskey-db-v18", DBName: config.DBName}
+	return &config.Config{
+		WebWorkload:    "misskey-web",
+		DBWorkload:     "misskey-db-v18",
+		DBName:         config.DBName,
+		MisskeyBaseURL: "https://misskey.example",
+	}
 }
 
 func TestRunnerRun_Order(t *testing.T) {
 	dep := &recordingDep{}
-	r := &runner{db: dep, s3: dep, k8s: dep, chk: dep}
+	r := &runner{db: dep, s3: dep, k8s: dep, api: dep}
 
 	if err := r.run(context.Background(), testConfig()); err != nil {
 		t.Fatalf("run returned unexpected error: %v", err)
@@ -112,7 +126,9 @@ func TestRunnerRun_Order(t *testing.T) {
 		"db-reset",
 		"db-restore",
 		"scale:misskey-web:1",
-		"checks",
+		"wait:misskey-web:1",
+		"misskey-readiness",
+		"misskey-global-timeline",
 		"scale:misskey-web:0",
 		"scale:misskey-db-v18:0",
 	}
@@ -135,11 +151,23 @@ func TestRunnerRun_Order(t *testing.T) {
 			t.Fatalf("scaleReplicas[%d] = %d, want %d (full: %v)", i, dep.scaleReplicas[i], wantReplicas[i], dep.scaleReplicas)
 		}
 	}
+
+	if len(dep.waitTimeouts) != 3 {
+		t.Fatalf("waitTimeouts = %v, want three waits", dep.waitTimeouts)
+	}
+	for i, timeout := range dep.waitTimeouts {
+		if timeout != scaleTimeout {
+			t.Fatalf("waitTimeouts[%d] = %v, want %v", i, timeout, scaleTimeout)
+		}
+	}
+	if dep.apiTimeout != scaleTimeout {
+		t.Fatalf("apiTimeout = %v, want %v", dep.apiTimeout, scaleTimeout)
+	}
 }
 
 func TestRunnerRun_StopsOnResetFailure(t *testing.T) {
 	dep := &recordingDep{failOn: map[string]error{"db-reset": errors.New("reset boom")}}
-	r := &runner{db: dep, s3: dep, k8s: dep, chk: dep}
+	r := &runner{db: dep, s3: dep, k8s: dep, api: dep}
 
 	err := r.run(context.Background(), testConfig())
 	if err == nil {
@@ -150,10 +178,10 @@ func TestRunnerRun_StopsOnResetFailure(t *testing.T) {
 	}
 
 	// After a reset failure the restore must never run; the web must be rolled
-	// back to 0 (via deferred rollback) and scale-to-1, checks, and cleanup
+	// back to 0 (via deferred rollback) and scale-to-1, API checks, and cleanup
 	// must never run.
 	for _, c := range dep.calls {
-		if c == "db-restore" || c == "scale:misskey-web:1" || c == "checks" || c == "scale:misskey-db-v18:0" {
+		if c == "db-restore" || c == "scale:misskey-web:1" || c == "misskey-readiness" || c == "misskey-global-timeline" || c == "scale:misskey-db-v18:0" {
 			t.Fatalf("calls = %v, unexpected call %q after reset failure", dep.calls, c)
 		}
 	}
@@ -163,7 +191,7 @@ func TestRunnerRun_StopsOnDBReadinessFailure(t *testing.T) {
 	dep := &recordingDep{failOn: map[string]error{
 		"wait:misskey-db-v18:1": errors.New("db not ready"),
 	}}
-	r := &runner{db: dep, s3: dep, k8s: dep, chk: dep}
+	r := &runner{db: dep, s3: dep, k8s: dep, api: dep}
 
 	err := r.run(context.Background(), testConfig())
 	if err == nil {
@@ -181,7 +209,7 @@ func TestRunnerRun_StopsOnDBReadinessFailure(t *testing.T) {
 
 func TestRunnerRun_StopsOnRestoreFailure(t *testing.T) {
 	dep := &recordingDep{failOn: map[string]error{"db-restore": errors.New("restore boom")}}
-	r := &runner{db: dep, s3: dep, k8s: dep, chk: dep}
+	r := &runner{db: dep, s3: dep, k8s: dep, api: dep}
 
 	err := r.run(context.Background(), testConfig())
 	if err == nil {
@@ -192,9 +220,9 @@ func TestRunnerRun_StopsOnRestoreFailure(t *testing.T) {
 	}
 
 	// After a restore failure the web must be rolled back to 0 (via deferred
-	// rollback) but scale-to-1, checks, and cleanup must never run.
+	// rollback) but scale-to-1, API checks, and cleanup must never run.
 	for _, c := range dep.calls {
-		if c == "scale:misskey-web:1" || c == "checks" || c == "scale:misskey-db-v18:0" {
+		if c == "scale:misskey-web:1" || c == "misskey-readiness" || c == "misskey-global-timeline" || c == "scale:misskey-db-v18:0" {
 			t.Fatalf("calls = %v, unexpected call %q after restore failure", dep.calls, c)
 		}
 	}
@@ -208,6 +236,116 @@ func TestRunnerRun_StopsOnRestoreFailure(t *testing.T) {
 	for i := range wantReplicas {
 		if dep.scaleReplicas[i] != wantReplicas[i] {
 			t.Fatalf("scaleReplicas[%d] = %d, want %d (full: %v)", i, dep.scaleReplicas[i], wantReplicas[i], dep.scaleReplicas)
+		}
+	}
+}
+
+func TestRunnerRun_StopsOnMisskeyReadinessFailure(t *testing.T) {
+	dep := &recordingDep{failOn: map[string]error{
+		"misskey-readiness": errors.New("Misskey not ready"),
+	}}
+	r := &runner{db: dep, s3: dep, k8s: dep, api: dep}
+
+	err := r.run(context.Background(), testConfig())
+	if err == nil {
+		t.Fatal("expected run to fail when Misskey readiness fails")
+	}
+	if !strings.Contains(err.Error(), "wait for Misskey API readiness") {
+		t.Fatalf("error = %v, want it to mention Misskey readiness", err)
+	}
+
+	wantTail := []string{
+		"scale:misskey-web:1",
+		"wait:misskey-web:1",
+		"misskey-readiness",
+		"scale:misskey-web:0",
+	}
+	assertCallTail(t, dep.calls, wantTail)
+	assertNoCalls(t, dep.calls, "misskey-global-timeline", "scale:misskey-db-v18:0")
+}
+
+func TestRunnerRun_StopsOnWebStartWaitFailure(t *testing.T) {
+	dep := &recordingDep{failOn: map[string]error{
+		"wait:misskey-web:1": errors.New("web not ready"),
+	}}
+	r := &runner{db: dep, s3: dep, k8s: dep, api: dep}
+
+	err := r.run(context.Background(), testConfig())
+	if err == nil {
+		t.Fatal("expected run to fail when the web replica wait fails")
+	}
+	if !strings.Contains(err.Error(), "wait web replicas 1") {
+		t.Fatalf("error = %v, want it to mention the web replica wait", err)
+	}
+
+	assertCallTail(t, dep.calls, []string{
+		"db-restore",
+		"scale:misskey-web:1",
+		"wait:misskey-web:1",
+		"scale:misskey-web:0",
+	})
+	assertNoCalls(t, dep.calls, "misskey-readiness", "misskey-global-timeline", "scale:misskey-db-v18:0")
+}
+
+func TestRunnerRun_StopsOnGlobalTimelineFailure(t *testing.T) {
+	dep := &recordingDep{failOn: map[string]error{
+		"misskey-global-timeline": errors.New("invalid timeline"),
+	}}
+	r := &runner{db: dep, s3: dep, k8s: dep, api: dep}
+
+	err := r.run(context.Background(), testConfig())
+	if err == nil {
+		t.Fatal("expected run to fail when global timeline check fails")
+	}
+	if !strings.Contains(err.Error(), "check Misskey global timeline") {
+		t.Fatalf("error = %v, want it to mention global timeline", err)
+	}
+
+	wantTail := []string{
+		"wait:misskey-web:1",
+		"misskey-readiness",
+		"misskey-global-timeline",
+		"scale:misskey-web:0",
+	}
+	assertCallTail(t, dep.calls, wantTail)
+	assertNoCalls(t, dep.calls, "scale:misskey-db-v18:0")
+}
+
+func TestRunnerRun_FailureBeforeDownloadDoesNotPanic(t *testing.T) {
+	dep := &recordingDep{failOn: map[string]error{"check": errors.New("connection boom")}}
+	r := &runner{db: dep, s3: dep, k8s: dep, api: dep}
+
+	err := r.run(context.Background(), testConfig())
+	if err == nil {
+		t.Fatal("expected run to fail when a connection check fails")
+	}
+	if !strings.Contains(err.Error(), "db connection check") {
+		t.Fatalf("error = %v, want it to mention DB connection check", err)
+	}
+	assertCallTail(t, dep.calls, []string{"check", "scale:misskey-web:0"})
+	assertNoCalls(t, dep.calls, "s3-download")
+}
+
+func assertCallTail(t *testing.T, calls, want []string) {
+	t.Helper()
+	if len(calls) < len(want) {
+		t.Fatalf("calls = %v, want tail %v", calls, want)
+	}
+	got := calls[len(calls)-len(want):]
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("calls tail = %v, want %v (full: %v)", got, want, calls)
+		}
+	}
+}
+
+func assertNoCalls(t *testing.T, calls []string, unwanted ...string) {
+	t.Helper()
+	for _, call := range calls {
+		for _, wantAbsent := range unwanted {
+			if call == wantAbsent {
+				t.Fatalf("calls = %v, unexpected call %q", calls, call)
+			}
 		}
 	}
 }

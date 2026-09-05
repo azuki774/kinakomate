@@ -9,15 +9,16 @@ import (
 
 func envForRun() map[string]string {
 	return map[string]string{
-		"WEB_WORKLOAD": "misskey-web",
-		"DB_WORKLOAD":  "misskey-db-v18",
-		"S3_REGION":    "us-east-1",
-		"S3_BUCKET":    "backups",
-		"S3_KEY":       "misskey/daily/dump.sql.gz",
-		"DB_HOST":      "db",
-		"DB_PORT":      "5432",
-		"DB_USER":      "misskey",
-		"DB_PASS":      "secret",
+		"WEB_WORKLOAD":     "misskey-web",
+		"DB_WORKLOAD":      "misskey-db-v18",
+		"S3_REGION":        "us-east-1",
+		"S3_BUCKET":        "backups",
+		"S3_KEY":           "misskey/daily/dump.sql.gz",
+		"DB_HOST":          "db",
+		"DB_PORT":          "5432",
+		"DB_USER":          "misskey",
+		"DB_PASS":          "secret",
+		"MISSKEY_BASE_URL": "https://misskey.example",
 	}
 }
 
@@ -25,7 +26,7 @@ func envForRun() map[string]string {
 // workflow without touching real S3 or Kubernetes or PostgreSQL.
 func noopRunner(_ context.Context, _ *config.Config) (*runner, error) {
 	dep := &recordingDep{}
-	return &runner{db: dep, s3: dep, k8s: dep, chk: dep}, nil
+	return &runner{db: dep, s3: dep, k8s: dep, api: dep}, nil
 }
 
 func TestRun_PreFlightFailsWithoutInput(t *testing.T) {

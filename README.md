@@ -25,8 +25,23 @@
 | `DB_PORT` | yes | 復元先 PostgreSQL の port |
 | `DB_USER` | yes | 復元先 PostgreSQL の user |
 | `DB_PASS` | yes | 復元先 PostgreSQL の password（ログに出さない） |
+| `MISSKEY_BASE_URL` | yes | 復元確認対象の Misskey URL。`http` / `https` の host を含む origin（末尾の `/` は任意） |
 
 復元先のデータベース名は固定値 `misskey` です（環境変数では指定しません）。
+`MISSKEY_BASE_URL` には user/password、root 以外の path、query、fragment を含められません。
+
+## 復元検証フロー
+
+runner は空のデータベースへダンプを復元した後、web workload を 1 replica に
+スケールし、実際の replica 数が 1 になるまで待機します。続いて
+`GET /healthz` が成功するまで readiness を確認し、
+`POST /api/notes/global-timeline` で 1〜10 件の Note が返ることと、各 Note の
+`id` / `createdAt` が妥当であることを検証します。成功時は web と db の両方を
+0 replica に戻します。
+
+途中で失敗した場合は後続処理を停止し、web を 0 replica に rollback します。
+DB 復元後の検証で失敗した場合は調査可能な状態を保つため、db を 1 replica の
+まま残し、通常 cleanup は行いません。
 
 ## データベースの再作成（リストア前の初期化）
 

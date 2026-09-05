@@ -52,24 +52,17 @@ type Kubernetes interface {
 	WaitForReplicas(ctx context.Context, cfg *config.Config, workload string, want int, timeout time.Duration) error
 }
 
-// Checks abstracts the post-restore verification commands (issue #7).
-type Checks interface {
-	// Run executes the ordered verification commands.
-	Run(ctx context.Context, cfg *config.Config) error
-}
-
 // runner wires the per-target dependencies together and runs the restore-test
 // workflow in a fixed order.
 type runner struct {
 	db  Database
 	s3  ObjectStorage
 	k8s Kubernetes
-	chk Checks
+	api MisskeyAPI
 }
 
 // newRunner builds a runner wired to the real dependencies: the Kubernetes
-// client (issue #4) plus object storage and database (issue #5). The checks
-// dependency is a placeholder (issue #7) that no-ops for now.
+// client, object storage, database, and Misskey HTTP API client.
 func newRunner(ctx context.Context, cfg *config.Config) (*runner, error) {
 	k8s, err := newKubernetesClient()
 	if err != nil {
@@ -83,16 +76,16 @@ func newRunner(ctx context.Context, cfg *config.Config) (*runner, error) {
 		db:  newDatabase(),
 		s3:  s3,
 		k8s: k8s,
-		chk: checksTODO{},
+		api: newMisskeyAPI(),
 	}, nil
 }
 
 // run executes the restore-test workflow in order:
 //
-//  1. DB connection check
-//  2. S3 connection check
-//  3. Kubernetes API connection check
-//  4. record current replica counts (for audit / recovery)
+//  1. record current replica counts (for audit / recovery)
+//  2. DB connection check
+//  3. S3 connection check
+//  4. Kubernetes API connection check
 //  5. S3 download + decompress (stages the gzip dump on disk)
 //  6. T1: scale web to 0, db to 1
 //  7. wait for web replicas to reach 0 and db replicas to reach 1
@@ -101,14 +94,15 @@ func newRunner(ctx context.Context, cfg *config.Config) (*runner, error) {
 //  9. DB restore (streams the gzip into psql, single transaction)
 //
 // 10. T2: scale web to 1
-//
-// 11. checks
-// 12. T3 (cleanup): scale web to 0, db to 0
+// 11. wait for web replicas to reach 1
+// 12. wait for Misskey API readiness
+// 13. check the Misskey global timeline
+// 14. T3 (cleanup): scale web to 0, db to 0
 //
 // On the first error it stops immediately and returns the wrapped error; the
 // remaining steps are not executed and the staged dump is removed. A deferred
-// rollback scales web back to 0 on failure (the azkey/web workload is the one
-// that must never stay up after a failed run).
+// rollback scales web back to 0 on failure (the web workload must never stay
+// up after a failed run).
 func (r *runner) run(ctx context.Context, cfg *config.Config) error {
 	logger := log.New()
 
@@ -164,7 +158,13 @@ func (r *runner) run(ctx context.Context, cfg *config.Config) error {
 		{"scale web to 1", func(ctx context.Context, cfg *config.Config) error {
 			return r.k8s.Scale(ctx, cfg, cfg.WebWorkload, 1)
 		}},
-		{"checks", r.chk.Run},
+		{"wait web replicas 1", func(ctx context.Context, cfg *config.Config) error {
+			return r.k8s.WaitForReplicas(ctx, cfg, cfg.WebWorkload, 1, scaleTimeout)
+		}},
+		{"wait for Misskey API readiness", func(ctx context.Context, cfg *config.Config) error {
+			return r.api.WaitForReadiness(ctx, cfg, scaleTimeout)
+		}},
+		{"check Misskey global timeline", r.api.CheckGlobalTimeline},
 		{"cleanup: scale web to 0", func(ctx context.Context, cfg *config.Config) error {
 			return r.k8s.Scale(ctx, cfg, cfg.WebWorkload, 0)
 		}},
@@ -176,13 +176,17 @@ func (r *runner) run(ctx context.Context, cfg *config.Config) error {
 	for _, s := range steps {
 		logger.InfoContext(ctx, "restore-test step start", "step", s.name)
 		if err := s.fn(ctx, cfg); err != nil {
-			dump.Cleanup()
+			if dump != nil {
+				dump.Cleanup()
+			}
 			return fmt.Errorf("restore-test step %q failed: %w", s.name, err)
 		}
 		logger.InfoContext(ctx, "restore-test step done", "step", s.name)
 	}
 
-	dump.Cleanup()
+	if dump != nil {
+		dump.Cleanup()
+	}
 	failed = false
 	return nil
 }
@@ -199,12 +203,4 @@ func (r *runner) recordReplicas(ctx context.Context, cfg *config.Config) {
 		}
 		logger.InfoContext(ctx, "current replicas", "workload", w, "replicas", n)
 	}
-}
-
-// checksTODO is a placeholder Checks dependency. Real logic lands in issue #7.
-type checksTODO struct{}
-
-func (checksTODO) Run(_ context.Context, _ *config.Config) error {
-	// TODO: implement verification checks.
-	return nil
 }
