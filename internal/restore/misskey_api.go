@@ -110,7 +110,7 @@ func (m *misskeyAPI) CheckGlobalTimeline(ctx context.Context, cfg *config.Config
 	}
 	defer resp.Body.Close() //nolint:errcheck
 	if !is2xx(resp.StatusCode) {
-		return fmt.Errorf("Misskey global timeline returned HTTP status %d", resp.StatusCode)
+		return fmt.Errorf("misskey global timeline returned HTTP status %d", resp.StatusCode)
 	}
 
 	count, err := validateGlobalTimeline(requestCtx, resp.Body)
@@ -136,27 +136,27 @@ func validateGlobalTimeline(ctx context.Context, body io.Reader) (int, error) {
 		if ctx.Err() != nil {
 			return 0, fmt.Errorf("read Misskey global timeline response: %w", ctx.Err())
 		}
-		return 0, fmt.Errorf("Misskey global timeline response must contain exactly one JSON value")
+		return 0, fmt.Errorf("misskey global timeline response must contain exactly one JSON value")
 	}
 	if len(notes) == 0 || len(notes) > 10 {
-		return 0, fmt.Errorf("Misskey global timeline returned an invalid note count")
+		return 0, fmt.Errorf("misskey global timeline returned an invalid note count")
 	}
 
 	for _, rawNote := range notes {
 		var fields map[string]json.RawMessage
 		if err := json.Unmarshal(rawNote, &fields); err != nil {
-			return 0, fmt.Errorf("Misskey global timeline contains an invalid note")
+			return 0, fmt.Errorf("misskey global timeline contains an invalid note")
 		}
 		id, err := noteString(fields, "id")
 		if err != nil || id == "" {
-			return 0, fmt.Errorf("Misskey global timeline contains an invalid note")
+			return 0, fmt.Errorf("misskey global timeline contains an invalid note")
 		}
 		createdAt, err := noteString(fields, "createdAt")
 		if err != nil || createdAt == "" {
-			return 0, fmt.Errorf("Misskey global timeline contains an invalid note")
+			return 0, fmt.Errorf("misskey global timeline contains an invalid note")
 		}
 		if _, err := time.Parse(time.RFC3339, createdAt); err != nil {
-			return 0, fmt.Errorf("Misskey global timeline contains an invalid note")
+			return 0, fmt.Errorf("misskey global timeline contains an invalid note")
 		}
 	}
 	return len(notes), nil
