@@ -8,8 +8,6 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
-	"regexp"
-	"strconv"
 	"strings"
 	"time"
 
@@ -21,8 +19,6 @@ const (
 	misskeyRetryInterval  = 2 * time.Second
 	misskeyRequestTimeout = 10 * time.Second
 )
-
-var strictRFC3339 = regexp.MustCompile(`^[0-9]{4}-[0-9]{2}-[0-9]{2}[Tt][0-9]{2}:[0-9]{2}:([0-9]{2})(?:\.[0-9]+)?([Zz]|([+-])([0-9]{2}):([0-9]{2}))$`)
 
 // MisskeyAPI describes the Misskey HTTP checks used after a restore.
 type MisskeyAPI interface {
@@ -159,35 +155,11 @@ func validateGlobalTimeline(ctx context.Context, body io.Reader) (int, error) {
 		if err != nil || createdAt == "" {
 			return 0, fmt.Errorf("Misskey global timeline contains an invalid note")
 		}
-		if err := parseStrictRFC3339(createdAt); err != nil {
+		if _, err := time.Parse(time.RFC3339, createdAt); err != nil {
 			return 0, fmt.Errorf("Misskey global timeline contains an invalid note")
 		}
 	}
 	return len(notes), nil
-}
-
-func parseStrictRFC3339(value string) error {
-	matches := strictRFC3339.FindStringSubmatch(value)
-	if matches == nil {
-		return fmt.Errorf("invalid RFC3339 syntax")
-	}
-	if matches[3] != "" {
-		offsetHour, _ := strconv.Atoi(matches[4])
-		offsetMinute, _ := strconv.Atoi(matches[5])
-		if offsetHour > 23 || offsetMinute > 59 {
-			return fmt.Errorf("invalid RFC3339 offset")
-		}
-	}
-
-	normalized := value[:10] + "T" + value[11:]
-	if strings.HasSuffix(normalized, "z") {
-		normalized = normalized[:len(normalized)-1] + "Z"
-	}
-	if matches[1] == "60" {
-		normalized = normalized[:17] + "59" + normalized[19:]
-	}
-	_, err := time.Parse(time.RFC3339, normalized)
-	return err
 }
 
 func noteString(fields map[string]json.RawMessage, name string) (string, error) {
