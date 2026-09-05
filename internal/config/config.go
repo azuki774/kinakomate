@@ -128,12 +128,14 @@ func LoadFromEnv() (*Config, error) {
 }
 
 func validateMisskeyBaseURL(raw string) error {
+	schemeEnd := strings.IndexByte(raw, ':')
+	if schemeEnd <= 0 || (raw[:schemeEnd] != "http" && raw[:schemeEnd] != "https") {
+		return fmt.Errorf("MISSKEY_BASE_URL %q must use http or https scheme", raw)
+	}
+
 	u, err := url.Parse(raw)
 	if err != nil {
 		return fmt.Errorf("MISSKEY_BASE_URL %q is not a valid URL: %w", raw, err)
-	}
-	if u.Scheme != "http" && u.Scheme != "https" {
-		return fmt.Errorf("MISSKEY_BASE_URL %q must use http or https scheme", raw)
 	}
 	if u.Hostname() == "" {
 		return fmt.Errorf("MISSKEY_BASE_URL %q must include a host", raw)

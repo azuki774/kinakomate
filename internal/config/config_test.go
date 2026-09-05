@@ -121,6 +121,8 @@ func TestLoadFromEnv_InvalidMisskeyBaseURL(t *testing.T) {
 		url  string
 	}{
 		{name: "invalid scheme", url: "ftp://misskey.example"},
+		{name: "uppercase scheme", url: "HTTP://misskey.example"},
+		{name: "mixed-case scheme", url: "HtTp://misskey.example"},
 		{name: "missing host", url: "https://"},
 		{name: "non-root path", url: "https://misskey.example/api"},
 		{name: "query", url: "https://misskey.example/?foo=bar"},
