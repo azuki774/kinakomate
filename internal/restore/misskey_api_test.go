@@ -35,6 +35,26 @@ type trackingReadCloser struct {
 	closed atomic.Bool
 }
 
+type contextAwareReadCloser struct {
+	ctx     context.Context
+	started chan<- struct{}
+	closed  atomic.Bool
+}
+
+func (body *contextAwareReadCloser) Read(_ []byte) (int, error) {
+	select {
+	case body.started <- struct{}{}:
+	default:
+	}
+	<-body.ctx.Done()
+	return 0, body.ctx.Err()
+}
+
+func (body *contextAwareReadCloser) Close() error {
+	body.closed.Store(true)
+	return nil
+}
+
 func (body *trackingReadCloser) Close() error {
 	body.closed.Store(true)
 	return nil
@@ -311,6 +331,137 @@ func TestMisskeyAPICheckGlobalTimelineRejectsInvalidResponsesWithoutLeakingBody(
 				t.Fatalf("CheckGlobalTimeline() error leaked response body: %v", err)
 			}
 		})
+	}
+}
+
+func TestMisskeyAPICheckGlobalTimelineRequiresExactNoteKeyNames(t *testing.T) {
+	t.Parallel()
+
+	tests := []string{
+		`[{"ID":"note-1","createdAt":"2026-09-05T12:00:00Z"}]`,
+		`[{"id":"note-1","CREATEDAT":"2026-09-05T12:00:00Z"}]`,
+	}
+	for _, body := range tests {
+		api := newMisskeyAPI()
+		api.client.Transport = roundTripFunc(func(_ *http.Request) (*http.Response, error) {
+			return response(http.StatusOK, body), nil
+		})
+
+		err := api.CheckGlobalTimeline(context.Background(), &config.Config{MisskeyBaseURL: "https://example.test"})
+		if err == nil {
+			t.Fatalf("CheckGlobalTimeline() accepted note with non-exact keys: %s", body)
+		}
+	}
+}
+
+func TestMisskeyAPICheckGlobalTimelineRequiresStrictRFC3339CreatedAt(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		createdAt string
+		wantErr   bool
+	}{
+		{"one digit hour", "2026-09-05T1:00:00Z", true},
+		{"comma fractional separator", "2026-09-05T12:00:00,123Z", true},
+		{"out of range offset", "2026-09-05T12:00:00+24:00", true},
+		{"fractional seconds", "2026-09-05T12:00:00.123456789Z", false},
+		{"legal offset", "2026-09-05T12:00:00+09:30", false},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			api := newMisskeyAPI()
+			body := `[{"id":"note-1","createdAt":"` + test.createdAt + `"}]`
+			api.client.Transport = roundTripFunc(func(_ *http.Request) (*http.Response, error) {
+				return response(http.StatusOK, body), nil
+			})
+
+			err := api.CheckGlobalTimeline(context.Background(), &config.Config{MisskeyBaseURL: "https://example.test"})
+			if test.wantErr && err == nil {
+				t.Fatal("CheckGlobalTimeline() accepted non-RFC3339 createdAt")
+			}
+			if !test.wantErr && err != nil {
+				t.Fatalf("CheckGlobalTimeline() error = %v", err)
+			}
+		})
+	}
+}
+
+func TestMisskeyAPICheckGlobalTimelineAcceptsExactlyTenNotes(t *testing.T) {
+	t.Parallel()
+
+	note := `{"id":"note-1","createdAt":"2026-09-05T12:00:00Z"}`
+	body := "[" + strings.TrimSuffix(strings.Repeat(note+",", 10), ",") + "]"
+	api := newMisskeyAPI()
+	api.client.Transport = roundTripFunc(func(_ *http.Request) (*http.Response, error) {
+		return response(http.StatusOK, body), nil
+	})
+
+	if err := api.CheckGlobalTimeline(context.Background(), &config.Config{MisskeyBaseURL: "https://example.test"}); err != nil {
+		t.Fatalf("CheckGlobalTimeline() error = %v", err)
+	}
+}
+
+func TestMisskeyAPICheckGlobalTimelineReturnsRequestDeadlineDuringBodyRead(t *testing.T) {
+	t.Parallel()
+
+	started := make(chan struct{}, 1)
+	api := newMisskeyAPI()
+	api.requestTimeout = 5 * time.Millisecond
+	api.client.Transport = roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Body:       &contextAwareReadCloser{ctx: request.Context(), started: started},
+		}, nil
+	})
+
+	result := make(chan error, 1)
+	go func() {
+		result <- api.CheckGlobalTimeline(context.Background(), &config.Config{MisskeyBaseURL: "https://example.test"})
+	}()
+	select {
+	case <-started:
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("timeline response body was not read")
+	}
+	select {
+	case err := <-result:
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("CheckGlobalTimeline() error = %v, want context deadline exceeded", err)
+		}
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("CheckGlobalTimeline() did not return promptly after request timeout")
+	}
+}
+
+func TestMisskeyAPICheckGlobalTimelineReturnsParentCancellationDuringBodyRead(t *testing.T) {
+	t.Parallel()
+
+	started := make(chan struct{}, 1)
+	api := newMisskeyAPI()
+	api.requestTimeout = time.Hour
+	api.client.Transport = roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Body:       &contextAwareReadCloser{ctx: request.Context(), started: started},
+		}, nil
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	result := make(chan error, 1)
+	go func() {
+		result <- api.CheckGlobalTimeline(ctx, &config.Config{MisskeyBaseURL: "https://example.test"})
+	}()
+	<-started
+	cancel()
+
+	select {
+	case err := <-result:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("CheckGlobalTimeline() error = %v, want context canceled", err)
+		}
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("CheckGlobalTimeline() did not return promptly after parent cancellation")
 	}
 }
 

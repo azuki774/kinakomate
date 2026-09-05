@@ -8,6 +8,8 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -19,6 +21,8 @@ const (
 	misskeyRetryInterval  = 2 * time.Second
 	misskeyRequestTimeout = 10 * time.Second
 )
+
+var strictRFC3339 = regexp.MustCompile(`^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]+)?(Z|([+-])([0-9]{2}):([0-9]{2}))$`)
 
 // MisskeyAPI describes the Misskey HTTP checks used after a restore.
 type MisskeyAPI interface {
@@ -103,6 +107,9 @@ func (m *misskeyAPI) CheckGlobalTimeline(ctx context.Context, cfg *config.Config
 
 	resp, err := m.client.Do(req)
 	if err != nil {
+		if requestCtx.Err() != nil {
+			return fmt.Errorf("request Misskey global timeline: %w", requestCtx.Err())
+		}
 		return fmt.Errorf("request Misskey global timeline: %w", err)
 	}
 	defer resp.Body.Close() //nolint:errcheck
@@ -110,7 +117,7 @@ func (m *misskeyAPI) CheckGlobalTimeline(ctx context.Context, cfg *config.Config
 		return fmt.Errorf("Misskey global timeline returned HTTP status %d", resp.StatusCode)
 	}
 
-	count, err := validateGlobalTimeline(resp.Body)
+	count, err := validateGlobalTimeline(requestCtx, resp.Body)
 	if err != nil {
 		return err
 	}
@@ -118,15 +125,21 @@ func (m *misskeyAPI) CheckGlobalTimeline(ctx context.Context, cfg *config.Config
 	return nil
 }
 
-func validateGlobalTimeline(body io.Reader) (int, error) {
+func validateGlobalTimeline(ctx context.Context, body io.Reader) (int, error) {
 	decoder := json.NewDecoder(body)
 	var notes []json.RawMessage
 	if err := decoder.Decode(&notes); err != nil {
+		if ctx.Err() != nil {
+			return 0, fmt.Errorf("read Misskey global timeline response: %w", ctx.Err())
+		}
 		return 0, fmt.Errorf("decode Misskey global timeline response")
 	}
 
 	var trailing any
 	if err := decoder.Decode(&trailing); err != io.EOF {
+		if ctx.Err() != nil {
+			return 0, fmt.Errorf("read Misskey global timeline response: %w", ctx.Err())
+		}
 		return 0, fmt.Errorf("Misskey global timeline response must contain exactly one JSON value")
 	}
 	if len(notes) == 0 || len(notes) > 10 {
@@ -134,18 +147,51 @@ func validateGlobalTimeline(body io.Reader) (int, error) {
 	}
 
 	for _, rawNote := range notes {
-		var note struct {
-			ID        *string `json:"id"`
-			CreatedAt *string `json:"createdAt"`
-		}
-		if err := json.Unmarshal(rawNote, &note); err != nil || note.ID == nil || *note.ID == "" || note.CreatedAt == nil || *note.CreatedAt == "" {
+		var fields map[string]json.RawMessage
+		if err := json.Unmarshal(rawNote, &fields); err != nil {
 			return 0, fmt.Errorf("Misskey global timeline contains an invalid note")
 		}
-		if _, err := time.Parse(time.RFC3339, *note.CreatedAt); err != nil {
+		id, err := noteString(fields, "id")
+		if err != nil || id == "" {
+			return 0, fmt.Errorf("Misskey global timeline contains an invalid note")
+		}
+		createdAt, err := noteString(fields, "createdAt")
+		if err != nil || createdAt == "" {
+			return 0, fmt.Errorf("Misskey global timeline contains an invalid note")
+		}
+		if err := parseStrictRFC3339(createdAt); err != nil {
 			return 0, fmt.Errorf("Misskey global timeline contains an invalid note")
 		}
 	}
 	return len(notes), nil
+}
+
+func parseStrictRFC3339(value string) error {
+	matches := strictRFC3339.FindStringSubmatch(value)
+	if matches == nil {
+		return fmt.Errorf("invalid RFC3339 syntax")
+	}
+	if matches[2] != "" {
+		offsetHour, _ := strconv.Atoi(matches[3])
+		offsetMinute, _ := strconv.Atoi(matches[4])
+		if offsetHour > 23 || offsetMinute > 59 {
+			return fmt.Errorf("invalid RFC3339 offset")
+		}
+	}
+	_, err := time.Parse(time.RFC3339, value)
+	return err
+}
+
+func noteString(fields map[string]json.RawMessage, name string) (string, error) {
+	raw, ok := fields[name]
+	if !ok {
+		return "", fmt.Errorf("missing note field")
+	}
+	var value string
+	if err := json.Unmarshal(raw, &value); err != nil {
+		return "", err
+	}
+	return value, nil
 }
 
 func misskeyURL(cfg *config.Config, path string) string {
