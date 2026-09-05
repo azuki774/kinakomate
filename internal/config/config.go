@@ -37,6 +37,9 @@ type Config struct {
 	// It is fixed and never mutated.
 	DBWorkload string
 
+	// MisskeyBaseURL is the base URL of the Misskey instance.
+	MisskeyBaseURL string
+
 	// S3Endpoint is the endpoint used for the fixed backup object. Empty means
 	// the AWS default endpoint; a non-empty value targets an S3-compatible
 	// server and is accessed in path-style.
@@ -65,6 +68,7 @@ var requiredEnv = []struct {
 }{
 	{"WEB_WORKLOAD", "WEB_WORKLOAD"},
 	{"DB_WORKLOAD", "DB_WORKLOAD"},
+	{"MISSKEY_BASE_URL", "MISSKEY_BASE_URL"},
 	{"S3_REGION", "S3_REGION"},
 	{"S3_BUCKET", "S3_BUCKET"},
 	{"S3_KEY", "S3_KEY"},
@@ -96,6 +100,9 @@ func LoadFromEnv() (*Config, error) {
 	if !workloadNameRegexp.MatchString(values["DB_WORKLOAD"]) {
 		return nil, fmt.Errorf("DB_WORKLOAD %q is not a valid RFC 1123 label", values["DB_WORKLOAD"])
 	}
+	if err := validateMisskeyBaseURL(values["MISSKEY_BASE_URL"]); err != nil {
+		return nil, err
+	}
 
 	// S3_ENDPOINT is optional: empty selects the AWS default endpoint.
 	s3Endpoint := strings.TrimSpace(os.Getenv("S3_ENDPOINT"))
@@ -104,19 +111,46 @@ func LoadFromEnv() (*Config, error) {
 	}
 
 	cfg := &Config{
-		WebWorkload: values["WEB_WORKLOAD"],
-		DBWorkload:  values["DB_WORKLOAD"],
-		S3Endpoint:  s3Endpoint,
-		S3Region:    values["S3_REGION"],
-		S3Bucket:    values["S3_BUCKET"],
-		S3Key:       values["S3_KEY"],
-		DBHost:      values["DB_HOST"],
-		DBPort:      values["DB_PORT"],
-		DBUser:      values["DB_USER"],
-		DBPass:      values["DB_PASS"],
-		DBName:      DBName,
+		WebWorkload:    values["WEB_WORKLOAD"],
+		DBWorkload:     values["DB_WORKLOAD"],
+		MisskeyBaseURL: values["MISSKEY_BASE_URL"],
+		S3Endpoint:     s3Endpoint,
+		S3Region:       values["S3_REGION"],
+		S3Bucket:       values["S3_BUCKET"],
+		S3Key:          values["S3_KEY"],
+		DBHost:         values["DB_HOST"],
+		DBPort:         values["DB_PORT"],
+		DBUser:         values["DB_USER"],
+		DBPass:         values["DB_PASS"],
+		DBName:         DBName,
 	}
 	return cfg, nil
+}
+
+func validateMisskeyBaseURL(raw string) error {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return fmt.Errorf("MISSKEY_BASE_URL %q is not a valid URL: %w", raw, err)
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return fmt.Errorf("MISSKEY_BASE_URL %q must use http or https scheme", raw)
+	}
+	if u.Hostname() == "" {
+		return fmt.Errorf("MISSKEY_BASE_URL %q must include a host", raw)
+	}
+	if u.User != nil {
+		return fmt.Errorf("MISSKEY_BASE_URL %q must not include userinfo", raw)
+	}
+	if u.Path != "" && u.Path != "/" {
+		return fmt.Errorf("MISSKEY_BASE_URL %q must have an empty or root path", raw)
+	}
+	if u.RawQuery != "" || u.ForceQuery || strings.ContainsRune(raw, '?') {
+		return fmt.Errorf("MISSKEY_BASE_URL %q must not include a query", raw)
+	}
+	if u.Fragment != "" || strings.ContainsRune(raw, '#') {
+		return fmt.Errorf("MISSKEY_BASE_URL %q must not include a fragment", raw)
+	}
+	return nil
 }
 
 // validateS3Endpoint rejects a clearly malformed endpoint. The empty string is
@@ -142,15 +176,16 @@ func validateS3Endpoint(raw string) error {
 // It omits the secret database password.
 func (c *Config) Loggable() map[string]any {
 	return map[string]any{
-		"web_workload": c.WebWorkload,
-		"db_workload":  c.DBWorkload,
-		"s3_endpoint":  c.S3Endpoint,
-		"s3_region":    c.S3Region,
-		"s3_bucket":    c.S3Bucket,
-		"s3_key":       c.S3Key,
-		"db_host":      c.DBHost,
-		"db_port":      c.DBPort,
-		"db_user":      c.DBUser,
-		"db_name":      c.DBName,
+		"web_workload":     c.WebWorkload,
+		"db_workload":      c.DBWorkload,
+		"misskey_base_url": c.MisskeyBaseURL,
+		"s3_endpoint":      c.S3Endpoint,
+		"s3_region":        c.S3Region,
+		"s3_bucket":        c.S3Bucket,
+		"s3_key":           c.S3Key,
+		"db_host":          c.DBHost,
+		"db_port":          c.DBPort,
+		"db_user":          c.DBUser,
+		"db_name":          c.DBName,
 	}
 }

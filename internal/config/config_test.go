@@ -18,22 +18,23 @@ func setEnv(t *testing.T, env map[string]string) {
 
 func validEnv() map[string]string {
 	return map[string]string{
-		"WEB_WORKLOAD": "misskey-web",
-		"DB_WORKLOAD":  "misskey-db-v18",
-		"S3_REGION":    "us-east-1",
-		"S3_BUCKET":    "backups",
-		"S3_KEY":       "misskey/daily/dump.sql.gz",
-		"DB_HOST":      "db",
-		"DB_PORT":      "5432",
-		"DB_USER":      "misskey",
-		"DB_PASS":      "secret",
+		"WEB_WORKLOAD":     "misskey-web",
+		"DB_WORKLOAD":      "misskey-db-v18",
+		"S3_REGION":        "us-east-1",
+		"S3_BUCKET":        "backups",
+		"S3_KEY":           "misskey/daily/dump.sql.gz",
+		"MISSKEY_BASE_URL": "https://misskey.example",
+		"DB_HOST":          "db",
+		"DB_PORT":          "5432",
+		"DB_USER":          "misskey",
+		"DB_PASS":          "secret",
 	}
 }
 
 func TestLoadFromEnv_MissingRequired(t *testing.T) {
 	for _, missing := range []string{
 		"WEB_WORKLOAD", "DB_WORKLOAD", "S3_REGION", "S3_BUCKET", "S3_KEY",
-		"DB_HOST", "DB_PORT", "DB_USER", "DB_PASS",
+		"MISSKEY_BASE_URL", "DB_HOST", "DB_PORT", "DB_USER", "DB_PASS",
 	} {
 		t.Run(missing, func(t *testing.T) {
 			env := validEnv()
@@ -88,6 +89,56 @@ func TestLoadFromEnv_InvalidEndpoint(t *testing.T) {
 	}
 }
 
+func TestLoadFromEnv_MisskeyBaseURLValid(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		url  string
+		want string
+	}{
+		{name: "https without path", url: "https://misskey.example", want: "https://misskey.example"},
+		{name: "http with root path", url: "http://misskey.example/", want: "http://misskey.example/"},
+		{name: "trimmed", url: "  https://misskey.example/  ", want: "https://misskey.example/"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			env := validEnv()
+			env["MISSKEY_BASE_URL"] = tc.url
+			setEnv(t, env)
+
+			cfg, err := LoadFromEnv()
+			if err != nil {
+				t.Fatalf("unexpected error for MISSKEY_BASE_URL %q: %v", tc.url, err)
+			}
+			if cfg.MisskeyBaseURL != tc.want {
+				t.Errorf("MisskeyBaseURL = %q, want %q", cfg.MisskeyBaseURL, tc.want)
+			}
+		})
+	}
+}
+
+func TestLoadFromEnv_InvalidMisskeyBaseURL(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		url  string
+	}{
+		{name: "invalid scheme", url: "ftp://misskey.example"},
+		{name: "missing host", url: "https://"},
+		{name: "non-root path", url: "https://misskey.example/api"},
+		{name: "query", url: "https://misskey.example/?foo=bar"},
+		{name: "fragment", url: "https://misskey.example/#section"},
+		{name: "userinfo", url: "https://user:pass@misskey.example"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			env := validEnv()
+			env["MISSKEY_BASE_URL"] = tc.url
+			setEnv(t, env)
+
+			if _, err := LoadFromEnv(); err == nil {
+				t.Fatalf("expected error for MISSKEY_BASE_URL %q", tc.url)
+			}
+		})
+	}
+}
+
 func TestLoadFromEnv_EmptyEndpointAllowed(t *testing.T) {
 	env := validEnv()
 	env["S3_ENDPOINT"] = ""
@@ -127,11 +178,12 @@ func TestLoadFromEnv_Success(t *testing.T) {
 
 func TestConfig_Loggable_OmitsPassword(t *testing.T) {
 	cfg := &Config{
-		WebWorkload: "misskey-web",
-		DBWorkload:  "misskey-db-v18",
-		S3Bucket:    "b",
-		DBPass:      "secret",
-		DBName:      DBName,
+		WebWorkload:    "misskey-web",
+		DBWorkload:     "misskey-db-v18",
+		MisskeyBaseURL: "https://misskey.example/",
+		S3Bucket:       "b",
+		DBPass:         "secret",
+		DBName:         DBName,
 	}
 	loggable := cfg.Loggable()
 	if _, ok := loggable["db_pass"]; ok {
@@ -142,5 +194,8 @@ func TestConfig_Loggable_OmitsPassword(t *testing.T) {
 	}
 	if loggable["db_workload"] != "misskey-db-v18" {
 		t.Error("Loggable should include db_workload")
+	}
+	if loggable["misskey_base_url"] != "https://misskey.example/" {
+		t.Error("Loggable should include misskey_base_url")
 	}
 }
