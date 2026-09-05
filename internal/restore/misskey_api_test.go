@@ -365,8 +365,11 @@ func TestMisskeyAPICheckGlobalTimelineRequiresStrictRFC3339CreatedAt(t *testing.
 		{"one digit hour", "2026-09-05T1:00:00Z", true},
 		{"comma fractional separator", "2026-09-05T12:00:00,123Z", true},
 		{"out of range offset", "2026-09-05T12:00:00+24:00", true},
+		{"second beyond leap second", "1990-12-31T23:59:61Z", true},
 		{"fractional seconds", "2026-09-05T12:00:00.123456789Z", false},
 		{"legal offset", "2026-09-05T12:00:00+09:30", false},
+		{"lowercase t and z", "2026-09-05t12:00:00z", false},
+		{"leap second", "1990-12-31T23:59:60Z", false},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {

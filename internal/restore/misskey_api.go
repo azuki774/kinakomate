@@ -22,7 +22,7 @@ const (
 	misskeyRequestTimeout = 10 * time.Second
 )
 
-var strictRFC3339 = regexp.MustCompile(`^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]+)?(Z|([+-])([0-9]{2}):([0-9]{2}))$`)
+var strictRFC3339 = regexp.MustCompile(`^[0-9]{4}-[0-9]{2}-[0-9]{2}[Tt][0-9]{2}:[0-9]{2}:([0-9]{2})(?:\.[0-9]+)?([Zz]|([+-])([0-9]{2}):([0-9]{2}))$`)
 
 // MisskeyAPI describes the Misskey HTTP checks used after a restore.
 type MisskeyAPI interface {
@@ -171,14 +171,22 @@ func parseStrictRFC3339(value string) error {
 	if matches == nil {
 		return fmt.Errorf("invalid RFC3339 syntax")
 	}
-	if matches[2] != "" {
-		offsetHour, _ := strconv.Atoi(matches[3])
-		offsetMinute, _ := strconv.Atoi(matches[4])
+	if matches[3] != "" {
+		offsetHour, _ := strconv.Atoi(matches[4])
+		offsetMinute, _ := strconv.Atoi(matches[5])
 		if offsetHour > 23 || offsetMinute > 59 {
 			return fmt.Errorf("invalid RFC3339 offset")
 		}
 	}
-	_, err := time.Parse(time.RFC3339, value)
+
+	normalized := value[:10] + "T" + value[11:]
+	if strings.HasSuffix(normalized, "z") {
+		normalized = normalized[:len(normalized)-1] + "Z"
+	}
+	if matches[1] == "60" {
+		normalized = normalized[:17] + "59" + normalized[19:]
+	}
+	_, err := time.Parse(time.RFC3339, normalized)
 	return err
 }
 
