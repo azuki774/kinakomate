@@ -108,6 +108,7 @@ func TestRunnerRun_Order(t *testing.T) {
 		"scale:misskey-web:0",
 		"scale:misskey-db-v18:1",
 		"wait:misskey-web:0",
+		"wait:misskey-db-v18:1",
 		"db-reset",
 		"db-restore",
 		"scale:misskey-web:1",
@@ -154,6 +155,26 @@ func TestRunnerRun_StopsOnResetFailure(t *testing.T) {
 	for _, c := range dep.calls {
 		if c == "db-restore" || c == "scale:misskey-web:1" || c == "checks" || c == "scale:misskey-db-v18:0" {
 			t.Fatalf("calls = %v, unexpected call %q after reset failure", dep.calls, c)
+		}
+	}
+}
+
+func TestRunnerRun_StopsOnDBReadinessFailure(t *testing.T) {
+	dep := &recordingDep{failOn: map[string]error{
+		"wait:misskey-db-v18:1": errors.New("db not ready"),
+	}}
+	r := &runner{db: dep, s3: dep, k8s: dep, chk: dep}
+
+	err := r.run(context.Background(), testConfig())
+	if err == nil {
+		t.Fatal("expected run to fail when DB readiness wait fails")
+	}
+	if !strings.Contains(err.Error(), "wait db replicas 1") {
+		t.Fatalf("error = %v, want it to mention DB readiness", err)
+	}
+	for _, c := range dep.calls {
+		if c == "db-reset" || c == "db-restore" {
+			t.Fatalf("calls = %v, database operations must not run before DB readiness", dep.calls)
 		}
 	}
 }

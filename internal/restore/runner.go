@@ -95,7 +95,7 @@ func newRunner(ctx context.Context, cfg *config.Config) (*runner, error) {
 //  4. record current replica counts (for audit / recovery)
 //  5. S3 download + decompress (stages the gzip dump on disk)
 //  6. T1: scale web to 0, db to 1
-//  7. wait for web replicas to reach 0
+//  7. wait for web replicas to reach 0 and db replicas to reach 1
 //  8. reset database (terminate backends, DROP IF EXISTS, CREATE from
 //     template0 — a plain SQL dump does not clean the target itself)
 //  9. DB restore (streams the gzip into psql, single transaction)
@@ -153,6 +153,9 @@ func (r *runner) run(ctx context.Context, cfg *config.Config) error {
 		}},
 		{"wait web replicas 0", func(ctx context.Context, cfg *config.Config) error {
 			return r.k8s.WaitForReplicas(ctx, cfg, cfg.WebWorkload, 0, scaleTimeout)
+		}},
+		{"wait db replicas 1", func(ctx context.Context, cfg *config.Config) error {
+			return r.k8s.WaitForReplicas(ctx, cfg, cfg.DBWorkload, 1, scaleTimeout)
 		}},
 		{"reset database", r.db.Reset},
 		{"db restore", func(ctx context.Context, cfg *config.Config) error {
