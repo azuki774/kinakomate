@@ -1,6 +1,7 @@
 package config
 
 import (
+	"strings"
 	"testing"
 )
 
@@ -128,14 +129,52 @@ func TestLoadFromEnv_InvalidMisskeyBaseURL(t *testing.T) {
 		{name: "query", url: "https://misskey.example/?foo=bar"},
 		{name: "fragment", url: "https://misskey.example/#section"},
 		{name: "userinfo", url: "https://user:pass@misskey.example"},
+		{name: "empty query", url: "https://misskey.example?"},
+		{name: "empty fragment", url: "https://misskey.example#"},
+		{name: "whitespace only", url: "   "},
+		{name: "malformed URL", url: "https://misskey.example/%zz"},
+		{name: "hostless URL with port", url: "https://:8448"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			env := validEnv()
 			env["MISSKEY_BASE_URL"] = tc.url
 			setEnv(t, env)
 
-			if _, err := LoadFromEnv(); err == nil {
+			_, err := LoadFromEnv()
+			if err == nil {
 				t.Fatalf("expected error for MISSKEY_BASE_URL %q", tc.url)
+			}
+			if !strings.Contains(err.Error(), "MISSKEY_BASE_URL") {
+				t.Errorf("error %q does not identify MISSKEY_BASE_URL", err)
+			}
+		})
+	}
+}
+
+func TestLoadFromEnv_MisskeyBaseURLErrorDoesNotLeakInput(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		url       string
+		sensitive string
+	}{
+		{name: "userinfo", url: "https://user:super-secret@misskey.example", sensitive: "super-secret"},
+		{name: "query", url: "https://misskey.example/?token=query-secret", sensitive: "query-secret"},
+		{name: "malformed URL", url: "https://malformed-secret.example/%zz", sensitive: "malformed-secret"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			env := validEnv()
+			env["MISSKEY_BASE_URL"] = tc.url
+			setEnv(t, env)
+
+			_, err := LoadFromEnv()
+			if err == nil {
+				t.Fatalf("expected error for MISSKEY_BASE_URL %q", tc.url)
+			}
+			if strings.Contains(err.Error(), tc.url) {
+				t.Errorf("error %q leaks rejected URL", err)
+			}
+			if strings.Contains(err.Error(), tc.sensitive) {
+				t.Errorf("error %q leaks sensitive value %q", err, tc.sensitive)
 			}
 		})
 	}

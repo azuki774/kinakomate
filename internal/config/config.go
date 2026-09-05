@@ -130,27 +130,27 @@ func LoadFromEnv() (*Config, error) {
 func validateMisskeyBaseURL(raw string) error {
 	schemeEnd := strings.IndexByte(raw, ':')
 	if schemeEnd <= 0 || (raw[:schemeEnd] != "http" && raw[:schemeEnd] != "https") {
-		return fmt.Errorf("MISSKEY_BASE_URL %q must use http or https scheme", raw)
+		return fmt.Errorf("MISSKEY_BASE_URL must use http or https scheme")
 	}
 
 	u, err := url.Parse(raw)
 	if err != nil {
-		return fmt.Errorf("MISSKEY_BASE_URL %q is not a valid URL: %w", raw, err)
+		return fmt.Errorf("MISSKEY_BASE_URL must be a valid URL")
 	}
 	if u.Hostname() == "" {
-		return fmt.Errorf("MISSKEY_BASE_URL %q must include a host", raw)
+		return fmt.Errorf("MISSKEY_BASE_URL must include a host")
 	}
 	if u.User != nil {
-		return fmt.Errorf("MISSKEY_BASE_URL %q must not include userinfo", raw)
+		return fmt.Errorf("MISSKEY_BASE_URL must not include userinfo")
 	}
 	if u.Path != "" && u.Path != "/" {
-		return fmt.Errorf("MISSKEY_BASE_URL %q must have an empty or root path", raw)
+		return fmt.Errorf("MISSKEY_BASE_URL must have an empty or root path")
 	}
 	if u.RawQuery != "" || u.ForceQuery || strings.ContainsRune(raw, '?') {
-		return fmt.Errorf("MISSKEY_BASE_URL %q must not include a query", raw)
+		return fmt.Errorf("MISSKEY_BASE_URL must not include a query")
 	}
 	if u.Fragment != "" || strings.ContainsRune(raw, '#') {
-		return fmt.Errorf("MISSKEY_BASE_URL %q must not include a fragment", raw)
+		return fmt.Errorf("MISSKEY_BASE_URL must not include a fragment")
 	}
 	return nil
 }
