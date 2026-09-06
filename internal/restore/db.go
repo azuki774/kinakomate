@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	"github.com/azuki774/kinakomate/internal/config"
+	"github.com/azuki774/kinakomate/internal/log"
 )
 
 // adminDBName is the maintenance database used for the connection check and
@@ -44,17 +45,18 @@ type database struct {
 }
 
 // newDatabase builds a database with the default psql command runner.
-func newDatabase() *database {
-	return &database{
-		logger: slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo})),
+func newDatabase(logger *slog.Logger) *database {
+	if logger == nil {
+		logger = log.New()
 	}
+	return &database{logger: logger}
 }
 
 // log returns the configured logger or a default one so a database built
 // without a logger (as in tests) never panics.
 func (d *database) log() *slog.Logger {
 	if d.logger == nil {
-		return slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
+		return log.New()
 	}
 	return d.logger
 }
