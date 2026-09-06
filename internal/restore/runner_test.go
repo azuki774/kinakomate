@@ -297,7 +297,7 @@ func TestRunnerRun_StopsOnGlobalTimelineFailure(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected run to fail when global timeline check fails")
 	}
-	if !strings.Contains(err.Error(), "check Misskey global timeline") {
+	if !strings.Contains(err.Error(), "リストアデータのGTL取得確認") {
 		t.Fatalf("error = %v, want it to mention global timeline", err)
 	}
 

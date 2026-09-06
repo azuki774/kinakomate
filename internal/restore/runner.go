@@ -164,7 +164,7 @@ func (r *runner) run(ctx context.Context, cfg *config.Config) error {
 		{"wait for Misskey API readiness", func(ctx context.Context, cfg *config.Config) error {
 			return r.api.WaitForReadiness(ctx, cfg, scaleTimeout)
 		}},
-		{"check Misskey global timeline", r.api.CheckGlobalTimeline},
+		{"リストアデータのGTL取得確認", r.api.CheckGlobalTimeline},
 		{"cleanup: scale web to 0", func(ctx context.Context, cfg *config.Config) error {
 			return r.k8s.Scale(ctx, cfg, cfg.WebWorkload, 0)
 		}},
