@@ -3,16 +3,22 @@ package main
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 
+	"github.com/azuki774/kinakomate/internal/log"
 	"github.com/azuki774/kinakomate/internal/restore"
 )
 
 func main() {
 	if err := run(context.Background(), os.Args[1:]); err != nil {
-		fmt.Fprintf(os.Stderr, "kinakomate: %v\n", err)
+		logCommandError(os.Stderr, err)
 		os.Exit(1)
 	}
+}
+
+func logCommandError(w io.Writer, err error) {
+	log.NewWithWriter(w).Error("kinakomate command failed", "error", err)
 }
 
 func run(ctx context.Context, args []string) error {

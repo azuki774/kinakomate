@@ -78,6 +78,28 @@ runner を向けた環境では対象 DB 内のデータは常に失われます
 必要な権限: `DB_USER` は `postgres` maintenance database に接続でき、かつ
 対象データベースの ownership と `CREATEDB` 権限を持つ必要があります。
 
+## ログと終了コード
+
+`restore-test` は stderr へ JSON の構造化ログを出力します。処理終了時には
+`restore-test final report` という最終レコードを 1 件出力し、次の5フェーズの
+結果と所要時間をまとめます。
+
+- `preflight`: 入力検証と runner 初期化
+- `prepare`: 接続確認、レプリカ確認、S3 object の取得・検証
+- `restore`: web／DB の scale、DB 初期化、PostgreSQL 復元
+- `verify`: web 起動と checks
+- `cleanup`: 成功時の web／DB 停止。失敗時は web を 0 replica に戻す復旧
+
+各フェーズには `status`（`success`、`failure`、`skipped`）、`duration_ms`、
+人間向けの `duration` が含まれます。最終レコードには全体の
+`total_duration_ms` / `total_duration` も含まれます。S3 object を取得できた
+場合は `object.bucket`、`object.key`、`object.etag`、`object.size` も記録します。
+ローカルの一時ファイルパス、`DB_PASS`、AWS credential はログへ出力しません。
+
+全フェーズ成功時の終了コードは `0` です。入力検証、初期化、復元、checks、
+cleanup のいずれかが失敗した場合は非 `0` になります。初期化後の失敗時は
+調査用に DB 側を停止せず、web だけを 0 replica に戻します。
+
 ## S3 認証情報の依存
 
 S3 への read-only アクセスは、AWS SDK の標準 credential chain が環境変数
