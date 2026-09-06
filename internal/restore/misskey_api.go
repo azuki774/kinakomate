@@ -33,14 +33,18 @@ type misskeyAPI struct {
 	requestTimeout time.Duration
 }
 
-func newMisskeyAPI() *misskeyAPI {
+func newMisskeyAPI(loggers ...*slog.Logger) *misskeyAPI {
+	logger := log.New()
+	if len(loggers) > 0 && loggers[0] != nil {
+		logger = loggers[0]
+	}
 	return &misskeyAPI{
 		client: &http.Client{
 			CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
 				return http.ErrUseLastResponse
 			},
 		},
-		logger:         log.New(),
+		logger:         logger,
 		retryInterval:  misskeyRetryInterval,
 		requestTimeout: misskeyRequestTimeout,
 	}

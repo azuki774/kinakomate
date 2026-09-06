@@ -13,6 +13,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 
 	"github.com/azuki774/kinakomate/internal/config"
+	"github.com/azuki774/kinakomate/internal/log"
 )
 
 // s3API is the subset of the AWS S3 client the runner uses. It lets tests
@@ -36,7 +37,10 @@ type objectStorage struct {
 // newObjectStorage builds an S3 client from the config and the AWS SDK default
 // credential chain. An empty S3Endpoint selects the AWS default endpoint;
 // a non-empty endpoint is an S3-compatible server accessed in path-style.
-func newObjectStorage(ctx context.Context, cfg *config.Config) (*objectStorage, error) {
+func newObjectStorage(ctx context.Context, cfg *config.Config, logger *slog.Logger) (*objectStorage, error) {
+	if logger == nil {
+		logger = log.New()
+	}
 	loadOpts := []func(*awsconfig.LoadOptions) error{}
 	if cfg.S3Region != "" {
 		loadOpts = append(loadOpts, awsconfig.WithRegion(cfg.S3Region))
@@ -55,17 +59,27 @@ func newObjectStorage(ctx context.Context, cfg *config.Config) (*objectStorage, 
 
 	return &objectStorage{
 		client: client,
-		logger: slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo})),
+		logger: logger,
 	}, nil
 }
 
 // newObjectStorageWithClient builds an objectStorage over a provided s3API. It
 // is used by tests to inject a fake client.
-func newObjectStorageWithClient(client s3API) *objectStorage {
+func newObjectStorageWithClient(client s3API, logger *slog.Logger) *objectStorage {
+	if logger == nil {
+		logger = log.New()
+	}
 	return &objectStorage{
 		client: client,
-		logger: slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo})),
+		logger: logger,
 	}
+}
+
+func (o *objectStorage) log() *slog.Logger {
+	if o.logger == nil {
+		return log.New()
+	}
+	return o.logger
 }
 
 // CheckConnection verifies the fixed object is reachable and readable via a
@@ -79,7 +93,7 @@ func (o *objectStorage) CheckConnection(ctx context.Context, cfg *config.Config)
 		return fmt.Errorf("S3 HEAD %s/%s: %w", cfg.S3Bucket, cfg.S3Key, err)
 	}
 
-	o.logger.InfoContext(ctx, "s3 connection check ok",
+	o.log().InfoContext(ctx, "s3 connection check ok",
 		"s3_bucket", cfg.S3Bucket,
 		"s3_key", cfg.S3Key,
 		"s3_etag", aws.ToString(out.ETag),
@@ -132,7 +146,7 @@ func (o *objectStorage) DownloadAndExtract(ctx context.Context, cfg *config.Conf
 		return nil, err
 	}
 
-	o.logger.InfoContext(ctx, "s3 dump fetched and validated",
+	o.log().InfoContext(ctx, "s3 dump fetched and validated",
 		"s3_bucket", cfg.S3Bucket,
 		"s3_key", cfg.S3Key,
 		"s3_etag", aws.ToString(out.ETag),

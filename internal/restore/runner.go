@@ -3,6 +3,7 @@ package restore
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"time"
 
 	"github.com/azuki774/kinakomate/internal/config"
@@ -55,90 +56,97 @@ type Kubernetes interface {
 // runner wires the per-target dependencies together and runs the restore-test
 // workflow in a fixed order.
 type runner struct {
-	db  Database
-	s3  ObjectStorage
-	k8s Kubernetes
-	api MisskeyAPI
+	db     Database
+	s3     ObjectStorage
+	k8s    Kubernetes
+	api    MisskeyAPI
+	logger *slog.Logger
 }
 
 // newRunner builds a runner wired to the real dependencies: the Kubernetes
 // client, object storage, database, and Misskey HTTP API client.
-func newRunner(ctx context.Context, cfg *config.Config) (*runner, error) {
+func newRunner(ctx context.Context, cfg *config.Config, logger *slog.Logger) (*runner, error) {
+	if logger == nil {
+		logger = log.New()
+	}
 	k8s, err := newKubernetesClient()
 	if err != nil {
 		return nil, fmt.Errorf("failed to initialize kubernetes client: %w", err)
 	}
-	s3, err := newObjectStorage(ctx, cfg)
+	s3, err := newObjectStorage(ctx, cfg, logger)
 	if err != nil {
 		return nil, err
 	}
 	return &runner{
-		db:  newDatabase(),
-		s3:  s3,
-		k8s: k8s,
-		api: newMisskeyAPI(),
+		db:     newDatabase(logger),
+		s3:     s3,
+		k8s:    k8s,
+		api:    newMisskeyAPI(logger),
+		logger: logger,
 	}, nil
 }
 
-// run executes the restore-test workflow in order:
-//
-//  1. record current replica counts (for audit / recovery)
-//  2. DB connection check
-//  3. S3 connection check
-//  4. Kubernetes API connection check
-//  5. S3 download + decompress (stages the gzip dump on disk)
-//  6. T1: scale web to 0, db to 1
-//  7. wait for web replicas to reach 0 and db replicas to reach 1
-//  8. reset database (terminate backends, DROP IF EXISTS, CREATE from
-//     template0 — a plain SQL dump does not clean the target itself)
-//  9. DB restore (streams the gzip into psql, single transaction)
-//
-// 10. T2: scale web to 1
-// 11. wait for web replicas to reach 1
-// 12. wait for Misskey API readiness
-// 13. check the Misskey global timeline
-// 14. T3 (cleanup): scale web to 0, db to 0
-//
-// On the first error it stops immediately and returns the wrapped error; the
-// remaining steps are not executed and the staged dump is removed. A deferred
-// rollback scales web back to 0 on failure (the web workload must never stay
-// up after a failed run).
+// run preserves the original two-argument test API by supplying an already
+// initialized local result. Run uses runWithResult after preflight instead.
 func (r *runner) run(ctx context.Context, cfg *config.Config) error {
-	logger := log.New()
+	result := newExecutionResult(time.Now())
+	if err := result.beginPhase(phasePreflight, time.Now()); err != nil {
+		return err
+	}
+	if err := result.completePhase(time.Now()); err != nil {
+		return err
+	}
+	result.markInitialized()
+	return r.runWithResult(ctx, cfg, result)
+}
 
-	// Record the pre-run replica counts so a later run (or operator) can
-	// restore the original state if needed.
-	r.recordReplicas(ctx, cfg)
+type runnerStep struct {
+	name string
+	fn   func(context.Context, *config.Config) error
+}
 
-	failed := true
+func (r *runner) runWithResult(ctx context.Context, cfg *config.Config, result *executionResult) (err error) {
+	var dump *Dump
 	defer func() {
-		if !failed {
+		if dump == nil {
 			return
 		}
-		// Rollback: ensure web is scaled back to 0 on any failure.
-		rbCtx := context.WithoutCancel(ctx)
-		if err := r.k8s.Scale(rbCtx, cfg, cfg.WebWorkload, 0); err != nil {
-			logger.ErrorContext(ctx, "rollback: failed to scale web to 0", "err", err)
-		} else {
-			logger.InfoContext(ctx, "rollback: scaled web to 0", "workload", cfg.WebWorkload)
+		cleanupErr := dump.cleanup()
+		if cleanupErr == nil {
+			return
 		}
+		cleanupFailure := fmt.Errorf("staged dump cleanup failed: %w", cleanupErr)
+		attrs := []any{"phase", phaseCleanup, "err", cleanupErr}
+		if err != nil || result.failedPhase != "" {
+			attrs = append(attrs, "recovery_status", "error")
+		}
+		r.log().ErrorContext(ctx, "staged dump cleanup failed", attrs...)
+		if err == nil && result.failedPhase == "" {
+			result.failCompletedPhase(phaseCleanup, cleanupFailure)
+			err = cleanupFailure
+			return
+		}
+		result.recordRecoveryError(cleanupFailure)
 	}()
 
-	type step struct {
-		name string
-		fn   func(context.Context, *config.Config) error
-	}
-
-	var dump *Dump
-	steps := []step{
+	prepare := []runnerStep{
+		{"record replicas", func(ctx context.Context, cfg *config.Config) error {
+			r.recordReplicas(ctx, cfg)
+			return nil
+		}},
 		{"db connection check", r.db.CheckConnection},
 		{"s3 connection check", r.s3.CheckConnection},
 		{"kubernetes api connection check", r.k8s.CheckConnection},
 		{"s3 download + decompress", func(ctx context.Context, cfg *config.Config) error {
 			var err error
 			dump, err = r.s3.DownloadAndExtract(ctx, cfg)
+			if err == nil {
+				result.setObject(dump)
+			}
 			return err
 		}},
+	}
+	restore := []runnerStep{
 		{"scale web to 0", func(ctx context.Context, cfg *config.Config) error {
 			return r.k8s.Scale(ctx, cfg, cfg.WebWorkload, 0)
 		}},
@@ -155,6 +163,8 @@ func (r *runner) run(ctx context.Context, cfg *config.Config) error {
 		{"db restore", func(ctx context.Context, cfg *config.Config) error {
 			return r.db.Restore(ctx, cfg, dump)
 		}},
+	}
+	verify := []runnerStep{
 		{"scale web to 1", func(ctx context.Context, cfg *config.Config) error {
 			return r.k8s.Scale(ctx, cfg, cfg.WebWorkload, 1)
 		}},
@@ -165,36 +175,89 @@ func (r *runner) run(ctx context.Context, cfg *config.Config) error {
 			return r.api.WaitForReadiness(ctx, cfg, scaleTimeout)
 		}},
 		{"リストアデータのGTL取得確認", r.api.CheckGlobalTimeline},
-		{"cleanup: scale web to 0", func(ctx context.Context, cfg *config.Config) error {
+	}
+	cleanup := []runnerStep{
+		{"scale web to 0", func(ctx context.Context, cfg *config.Config) error {
 			return r.k8s.Scale(ctx, cfg, cfg.WebWorkload, 0)
 		}},
-		{"cleanup: scale db to 0", func(ctx context.Context, cfg *config.Config) error {
+		{"scale db to 0", func(ctx context.Context, cfg *config.Config) error {
 			return r.k8s.Scale(ctx, cfg, cfg.DBWorkload, 0)
 		}},
 	}
 
-	for _, s := range steps {
-		logger.InfoContext(ctx, "restore-test step start", "step", s.name)
-		if err := s.fn(ctx, cfg); err != nil {
-			if dump != nil {
-				dump.Cleanup()
-			}
-			return fmt.Errorf("restore-test step %q failed: %w", s.name, err)
+	for _, group := range []struct {
+		phase phaseName
+		steps []runnerStep
+	}{
+		{phasePrepare, prepare},
+		{phaseRestore, restore},
+		{phaseVerify, verify},
+		{phaseCleanup, cleanup},
+	} {
+		if err := r.runPhase(ctx, cfg, result, group.phase, group.steps); err != nil {
+			r.recover(ctx, cfg, result)
+			return err
 		}
-		logger.InfoContext(ctx, "restore-test step done", "step", s.name)
+	}
+	return nil
+}
+
+func (r *runner) runPhase(ctx context.Context, cfg *config.Config, result *executionResult, phase phaseName, steps []runnerStep) error {
+	logger := r.log()
+	if err := result.beginPhase(phase, time.Now()); err != nil {
+		return err
+	}
+	for _, step := range steps {
+		started := time.Now()
+		logger.InfoContext(ctx, "restore-test step start", "phase", phase, "step", step.name)
+		if err := step.fn(ctx, cfg); err != nil {
+			durationMS, duration := durationFields(time.Since(started))
+			wrapped := fmt.Errorf("%s phase step %q failed: %w", phase, step.name, err)
+			logger.ErrorContext(ctx, "restore-test step failed", "phase", phase, "step", step.name, "duration_ms", durationMS, "duration", duration, "err", err)
+			if stateErr := result.failPhase(phase, time.Now(), wrapped); stateErr != nil {
+				return fmt.Errorf("%w: record phase failure: %v", wrapped, stateErr)
+			}
+			return wrapped
+		}
+		durationMS, duration := durationFields(time.Since(started))
+		logger.InfoContext(ctx, "restore-test step done", "phase", phase, "step", step.name, "duration_ms", durationMS, "duration", duration)
+	}
+	return result.completePhase(time.Now())
+}
+
+func (r *runner) recover(ctx context.Context, cfg *config.Config, result *executionResult) {
+	if !result.recoveryRequired() {
+		return
+	}
+	logger := r.log()
+	rbCtx := context.WithoutCancel(ctx)
+	if err := result.beginPhase(phaseCleanup, time.Now()); err != nil {
+		logger.ErrorContext(rbCtx, "rollback: failed to scale web to 0", "phase", phaseCleanup, "step", "scale web to 0", "recovery_status", "error", "err", err)
+		return
 	}
 
-	if dump != nil {
-		dump.Cleanup()
+	started := time.Now()
+	logger.InfoContext(rbCtx, "restore-test recovery step start", "phase", phaseCleanup, "step", "scale web to 0")
+	err := r.k8s.Scale(rbCtx, cfg, cfg.WebWorkload, 0)
+	durationMS, duration := durationFields(time.Since(started))
+	if err != nil {
+		recoveryErr := fmt.Errorf("cleanup recovery step %q failed: %w", "scale web to 0", err)
+		logger.ErrorContext(rbCtx, "rollback: failed to scale web to 0", "phase", phaseCleanup, "step", "scale web to 0", "duration_ms", durationMS, "duration", duration, "recovery_status", "error", "err", err)
+		if stateErr := result.failPhase(phaseCleanup, time.Now(), recoveryErr); stateErr != nil {
+			logger.ErrorContext(rbCtx, "restore-test recovery report failed", "phase", phaseCleanup, "err", stateErr)
+		}
+		return
 	}
-	failed = false
-	return nil
+	logger.InfoContext(rbCtx, "rollback: scaled web to 0", "phase", phaseCleanup, "step", "scale web to 0", "duration_ms", durationMS, "duration", duration, "recovery_status", "success")
+	if err := result.completePhase(time.Now()); err != nil {
+		logger.ErrorContext(rbCtx, "restore-test recovery report failed", "phase", phaseCleanup, "err", err)
+	}
 }
 
 // recordReplicas logs the current replica count of the web and db workloads.
 // It is best-effort: a read failure is logged but does not stop the run.
 func (r *runner) recordReplicas(ctx context.Context, cfg *config.Config) {
-	logger := log.New()
+	logger := r.log()
 	for _, w := range []string{cfg.WebWorkload, cfg.DBWorkload} {
 		n, err := r.k8s.GetReplicas(ctx, cfg, w)
 		if err != nil {
@@ -203,4 +266,11 @@ func (r *runner) recordReplicas(ctx context.Context, cfg *config.Config) {
 		}
 		logger.InfoContext(ctx, "current replicas", "workload", w, "replicas", n)
 	}
+}
+
+func (r *runner) log() *slog.Logger {
+	if r.logger == nil {
+		return log.New()
+	}
+	return r.logger
 }

@@ -13,6 +13,7 @@ import (
 	"testing"
 
 	"github.com/azuki774/kinakomate/internal/config"
+	"github.com/azuki774/kinakomate/internal/log"
 )
 
 // capturePsql constructs a runPsql func that records every invocation (with
@@ -61,6 +62,16 @@ func writeGzip(t *testing.T, dir, data string) string {
 	return path
 }
 
+func TestNewDatabaseRetainsLogger(t *testing.T) {
+	logger := log.NewWithWriter(io.Discard)
+
+	db := newDatabase(logger)
+
+	if db.logger != logger {
+		t.Fatal("newDatabase did not retain the supplied logger")
+	}
+}
+
 func TestRestore_StreamsDecompressedSQLToPsql(t *testing.T) {
 	sql := "CREATE TABLE t(id int);\nINSERT INTO t VALUES (1);\n"
 	dumpPath := writeGzip(t, t.TempDir(), sql)
@@ -89,6 +100,24 @@ func TestRestore_StreamsDecompressedSQLToPsql(t *testing.T) {
 	got, _ := io.ReadAll(inv.Stdin)
 	if string(got) != sql {
 		t.Errorf("psql received = %q, want %q", got, sql)
+	}
+}
+
+func TestRestore_LogsToSuppliedLogger(t *testing.T) {
+	dumpPath := writeGzip(t, t.TempDir(), "SELECT 1;")
+	dump := &Dump{Path: dumpPath, Bucket: "b", Key: "k", ETag: "e", Size: 3}
+	cfg := &config.Config{DBHost: "db", DBPort: "5432", DBUser: "misskey", DBPass: "secret", DBName: config.DBName}
+	var output bytes.Buffer
+
+	run, _, _ := capturePsql(t, nil)
+	db := newDatabase(log.NewWithWriter(&output))
+	db.runPsql = run
+
+	if err := db.Restore(context.Background(), cfg, dump); err != nil {
+		t.Fatalf("Restore returned error: %v", err)
+	}
+	if !strings.Contains(output.String(), `"msg":"database restore completed"`) {
+		t.Fatalf("supplied logger did not receive database output: %q", output.String())
 	}
 }
 

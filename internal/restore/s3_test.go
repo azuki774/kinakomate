@@ -7,12 +7,14 @@ import (
 	"errors"
 	"io"
 	"os"
+	"strings"
 	"testing"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 
 	"github.com/azuki774/kinakomate/internal/config"
+	"github.com/azuki774/kinakomate/internal/log"
 )
 
 // fakeS3 simulates the S3 API. The body returned by GetObject is the exact
@@ -72,9 +74,19 @@ func gzipBytes(t *testing.T, data []byte) []byte {
 	return buf.Bytes()
 }
 
+func TestNewObjectStorageWithClientRetainsLogger(t *testing.T) {
+	logger := log.NewWithWriter(io.Discard)
+
+	o := newObjectStorageWithClient(&fakeS3{}, logger)
+
+	if o.logger != logger {
+		t.Fatal("newObjectStorageWithClient did not retain the supplied logger")
+	}
+}
+
 func TestCheckConnection_HeadOk(t *testing.T) {
 	fake := &fakeS3{etag: "\"abc\"", size: 42}
-	o := newObjectStorageWithClient(fake)
+	o := newObjectStorageWithClient(fake, log.NewWithWriter(io.Discard))
 
 	if err := o.CheckConnection(context.Background(), testCfg()); err != nil {
 		t.Fatalf("CheckConnection returned error: %v", err)
@@ -86,7 +98,7 @@ func TestCheckConnection_HeadOk(t *testing.T) {
 
 func TestCheckConnection_HeadError(t *testing.T) {
 	fake := &fakeS3{headErr: errors.New("head boom")}
-	o := newObjectStorageWithClient(fake)
+	o := newObjectStorageWithClient(fake, log.NewWithWriter(io.Discard))
 
 	if err := o.CheckConnection(context.Background(), testCfg()); err == nil {
 		t.Fatal("expected error on HeadObject failure")
@@ -96,7 +108,7 @@ func TestCheckConnection_HeadError(t *testing.T) {
 func TestDownloadAndExtract_StagesGzip(t *testing.T) {
 	sql := []byte("SELECT 1;\nCREATE TABLE t(id int);\n")
 	fake := &fakeS3{body: gzipBytes(t, sql), etag: "\"abc\"", size: int64(len(sql))}
-	o := newObjectStorageWithClient(fake)
+	o := newObjectStorageWithClient(fake, log.NewWithWriter(io.Discard))
 
 	dump, err := o.DownloadAndExtract(context.Background(), testCfg())
 	if err != nil {
@@ -128,9 +140,25 @@ func TestDownloadAndExtract_StagesGzip(t *testing.T) {
 	}
 }
 
+func TestDownloadAndExtract_LogsToSuppliedLogger(t *testing.T) {
+	sql := []byte("SELECT 1;\n")
+	fake := &fakeS3{body: gzipBytes(t, sql), etag: "\"abc\"", size: int64(len(sql))}
+	var output bytes.Buffer
+	o := newObjectStorageWithClient(fake, log.NewWithWriter(&output))
+
+	dump, err := o.DownloadAndExtract(context.Background(), testCfg())
+	if err != nil {
+		t.Fatalf("DownloadAndExtract returned error: %v", err)
+	}
+	t.Cleanup(dump.Cleanup)
+	if !strings.Contains(output.String(), `"msg":"s3 dump fetched and validated"`) {
+		t.Fatalf("supplied logger did not receive object-storage output: %q", output.String())
+	}
+}
+
 func TestDownloadAndExtract_InvalidGzip(t *testing.T) {
 	fake := &fakeS3{body: []byte("not a gzip stream"), etag: "\"abc\"", size: 15}
-	o := newObjectStorageWithClient(fake)
+	o := newObjectStorageWithClient(fake, log.NewWithWriter(io.Discard))
 
 	if _, err := o.DownloadAndExtract(context.Background(), testCfg()); err == nil {
 		t.Fatal("expected error on invalid gzip")
@@ -140,7 +168,7 @@ func TestDownloadAndExtract_InvalidGzip(t *testing.T) {
 func TestDownloadAndExtract_TruncatedGzip(t *testing.T) {
 	full := gzipBytes(t, []byte("SELECT 1;\n"))
 	fake := &fakeS3{body: full[:len(full)-6], etag: "\"abc\"", size: int64(len(full))}
-	o := newObjectStorageWithClient(fake)
+	o := newObjectStorageWithClient(fake, log.NewWithWriter(io.Discard))
 
 	if _, err := o.DownloadAndExtract(context.Background(), testCfg()); err == nil {
 		t.Fatal("expected error on truncated gzip")
@@ -149,7 +177,7 @@ func TestDownloadAndExtract_TruncatedGzip(t *testing.T) {
 
 func TestDownloadAndExtract_GetError(t *testing.T) {
 	fake := &fakeS3{getErr: errors.New("get boom")}
-	o := newObjectStorageWithClient(fake)
+	o := newObjectStorageWithClient(fake, log.NewWithWriter(io.Discard))
 
 	if _, err := o.DownloadAndExtract(context.Background(), testCfg()); err == nil {
 		t.Fatal("expected error on GetObject failure")

@@ -1,14 +1,17 @@
 package restore
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"io"
 	"os"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/azuki774/kinakomate/internal/config"
+	"github.com/azuki774/kinakomate/internal/log"
 )
 
 // recordingDep records every call so tests can assert on ordering and which
@@ -16,9 +19,13 @@ import (
 type recordingDep struct {
 	calls         []string
 	failOn        map[string]error
+	scaleErrors   map[string][]error
 	scaleReplicas []int
 	waitTimeouts  []time.Duration
 	apiTimeout    time.Duration
+	lastDump      *Dump
+	dumpPath      string
+	dumpCleanup   func() error
 }
 
 func (d *recordingDep) CheckConnection(_ context.Context, _ *config.Config) error {
@@ -28,7 +35,8 @@ func (d *recordingDep) CheckConnection(_ context.Context, _ *config.Config) erro
 
 func (d *recordingDep) DownloadAndExtract(_ context.Context, _ *config.Config) (*Dump, error) {
 	d.calls = append(d.calls, "s3-download")
-	return d.dump(), d.failOn["s3-download"]
+	d.lastDump = d.dump()
+	return d.lastDump, d.failOn["s3-download"]
 }
 
 func (d *recordingDep) Reset(_ context.Context, _ *config.Config) error {
@@ -54,8 +62,14 @@ func (d *recordingDep) GetReplicas(_ context.Context, _ *config.Config, workload
 
 func (d *recordingDep) Scale(_ context.Context, _ *config.Config, workload string, replicas int) error {
 	d.scaleReplicas = append(d.scaleReplicas, replicas)
-	d.calls = append(d.calls, "scale:"+workload+":"+itoa(replicas))
-	return d.failOn["scale:"+workload+":"+itoa(replicas)]
+	key := "scale:" + workload + ":" + itoa(replicas)
+	d.calls = append(d.calls, key)
+	if errors := d.scaleErrors[key]; len(errors) > 0 {
+		err := errors[0]
+		d.scaleErrors[key] = errors[1:]
+		return err
+	}
+	return d.failOn[key]
 }
 
 func (d *recordingDep) WaitForReplicas(_ context.Context, _ *config.Config, workload string, want int, timeout time.Duration) error {
@@ -77,12 +91,16 @@ func (d *recordingDep) CheckGlobalTimeline(_ context.Context, _ *config.Config) 
 
 // dump returns a Dump backed by a real temp file so Dump.Cleanup behaves.
 func (d *recordingDep) dump() *Dump {
-	f, err := os.CreateTemp("", "kinakomate-dump-*.sql.gz")
-	if err != nil {
-		return &Dump{Path: ""}
+	path := d.dumpPath
+	if path == "" {
+		f, err := os.CreateTemp("", "kinakomate-dump-*.sql.gz")
+		if err != nil {
+			return &Dump{Path: ""}
+		}
+		f.Close() //nolint:errcheck
+		path = f.Name()
 	}
-	f.Close() //nolint:errcheck
-	return &Dump{Path: f.Name(), Bucket: "b", Key: "k"}
+	return &Dump{Path: path, Bucket: "backups", Key: "daily.sql.gz", ETag: "\"etag\"", Size: 42, cleanupFn: d.dumpCleanup}
 }
 
 func itoa(n int) string {
@@ -104,9 +122,38 @@ func testConfig() *config.Config {
 	}
 }
 
+func newTestRunner(dep *recordingDep) *runner {
+	return &runner{
+		db:     dep,
+		s3:     dep,
+		k8s:    dep,
+		api:    dep,
+		logger: log.NewWithWriter(io.Discard),
+	}
+}
+
+func TestRunnerRunUsesSuppliedLogger(t *testing.T) {
+	var output bytes.Buffer
+	dep := &recordingDep{}
+	r := &runner{
+		db:     dep,
+		s3:     dep,
+		k8s:    dep,
+		api:    dep,
+		logger: log.NewWithWriter(&output),
+	}
+
+	if err := r.run(context.Background(), testConfig()); err != nil {
+		t.Fatalf("run returned unexpected error: %v", err)
+	}
+	if !strings.Contains(output.String(), `"msg":"restore-test step start"`) {
+		t.Fatalf("supplied logger did not receive runner logs: %q", output.String())
+	}
+}
+
 func TestRunnerRun_Order(t *testing.T) {
 	dep := &recordingDep{}
-	r := &runner{db: dep, s3: dep, k8s: dep, api: dep}
+	r := newTestRunner(dep)
 
 	if err := r.run(context.Background(), testConfig()); err != nil {
 		t.Fatalf("run returned unexpected error: %v", err)
@@ -167,7 +214,7 @@ func TestRunnerRun_Order(t *testing.T) {
 
 func TestRunnerRun_StopsOnResetFailure(t *testing.T) {
 	dep := &recordingDep{failOn: map[string]error{"db-reset": errors.New("reset boom")}}
-	r := &runner{db: dep, s3: dep, k8s: dep, api: dep}
+	r := newTestRunner(dep)
 
 	err := r.run(context.Background(), testConfig())
 	if err == nil {
@@ -187,11 +234,31 @@ func TestRunnerRun_StopsOnResetFailure(t *testing.T) {
 	}
 }
 
+func TestRunnerRun_StopsOnWebReadinessFailure(t *testing.T) {
+	dep := &recordingDep{failOn: map[string]error{
+		"wait:misskey-web:0": errors.New("web not ready"),
+	}}
+	r := newTestRunner(dep)
+
+	err := r.run(context.Background(), testConfig())
+	if err == nil {
+		t.Fatal("expected run to fail when web readiness wait fails")
+	}
+	if !strings.Contains(err.Error(), "wait web replicas 0") {
+		t.Fatalf("error = %v, want it to mention web readiness", err)
+	}
+	for _, c := range dep.calls {
+		if c == "db-reset" || c == "db-restore" {
+			t.Fatalf("calls = %v, database operations must not run before web readiness", dep.calls)
+		}
+	}
+}
+
 func TestRunnerRun_StopsOnDBReadinessFailure(t *testing.T) {
 	dep := &recordingDep{failOn: map[string]error{
 		"wait:misskey-db-v18:1": errors.New("db not ready"),
 	}}
-	r := &runner{db: dep, s3: dep, k8s: dep, api: dep}
+	r := newTestRunner(dep)
 
 	err := r.run(context.Background(), testConfig())
 	if err == nil {
@@ -209,7 +276,7 @@ func TestRunnerRun_StopsOnDBReadinessFailure(t *testing.T) {
 
 func TestRunnerRun_StopsOnRestoreFailure(t *testing.T) {
 	dep := &recordingDep{failOn: map[string]error{"db-restore": errors.New("restore boom")}}
-	r := &runner{db: dep, s3: dep, k8s: dep, api: dep}
+	r := newTestRunner(dep)
 
 	err := r.run(context.Background(), testConfig())
 	if err == nil {
@@ -244,7 +311,7 @@ func TestRunnerRun_StopsOnMisskeyReadinessFailure(t *testing.T) {
 	dep := &recordingDep{failOn: map[string]error{
 		"misskey-readiness": errors.New("Misskey not ready"),
 	}}
-	r := &runner{db: dep, s3: dep, k8s: dep, api: dep}
+	r := newTestRunner(dep)
 
 	err := r.run(context.Background(), testConfig())
 	if err == nil {
@@ -268,7 +335,7 @@ func TestRunnerRun_StopsOnWebStartWaitFailure(t *testing.T) {
 	dep := &recordingDep{failOn: map[string]error{
 		"wait:misskey-web:1": errors.New("web not ready"),
 	}}
-	r := &runner{db: dep, s3: dep, k8s: dep, api: dep}
+	r := newTestRunner(dep)
 
 	err := r.run(context.Background(), testConfig())
 	if err == nil {
@@ -291,7 +358,7 @@ func TestRunnerRun_StopsOnGlobalTimelineFailure(t *testing.T) {
 	dep := &recordingDep{failOn: map[string]error{
 		"misskey-global-timeline": errors.New("invalid timeline"),
 	}}
-	r := &runner{db: dep, s3: dep, k8s: dep, api: dep}
+	r := newTestRunner(dep)
 
 	err := r.run(context.Background(), testConfig())
 	if err == nil {
@@ -313,7 +380,7 @@ func TestRunnerRun_StopsOnGlobalTimelineFailure(t *testing.T) {
 
 func TestRunnerRun_FailureBeforeDownloadDoesNotPanic(t *testing.T) {
 	dep := &recordingDep{failOn: map[string]error{"check": errors.New("connection boom")}}
-	r := &runner{db: dep, s3: dep, k8s: dep, api: dep}
+	r := newTestRunner(dep)
 
 	err := r.run(context.Background(), testConfig())
 	if err == nil {
@@ -347,5 +414,20 @@ func assertNoCalls(t *testing.T, calls []string, unwanted ...string) {
 				t.Fatalf("calls = %v, unexpected call %q", calls, call)
 			}
 		}
+	}
+}
+
+func TestRunnerRun_CleansStagedDumpAfterFailure(t *testing.T) {
+	dep := &recordingDep{failOn: map[string]error{"db-restore": errors.New("restore boom")}}
+	r := newTestRunner(dep)
+
+	if err := r.run(context.Background(), testConfig()); err == nil {
+		t.Fatal("expected run to fail when restore fails")
+	}
+	if dep.lastDump == nil {
+		t.Fatal("download did not return a dump")
+	}
+	if _, err := os.Stat(dep.lastDump.Path); !os.IsNotExist(err) {
+		t.Fatalf("staged dump still exists or stat failed: path=%q err=%v", dep.lastDump.Path, err)
 	}
 }
