@@ -16,8 +16,9 @@ import (
 // when the input is invalid. This runs before any workload, database, or
 // external resource is touched, satisfying "validation before scale".
 //
-// The remaining steps (dump fetch, restore, migration, readiness, checks) are
-// implemented in later issues.
+// The runner then fetches the dump, restores it into a fresh database, starts
+// the web workload, waits for the Misskey API, validates the global timeline,
+// and cleans up the workloads.
 func Run(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("restore-test", flag.ContinueOnError)
 	if err := fs.Parse(args); err != nil {
