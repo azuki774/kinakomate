@@ -25,8 +25,16 @@
 | `DB_PORT` | yes | 復元先 PostgreSQL の port |
 | `DB_USER` | yes | 復元先 PostgreSQL の user |
 | `DB_PASS` | yes | 復元先 PostgreSQL の password（ログに出さない） |
+| `MISSKEY_BASE_URL` | yes | 復元確認対象の Misskey URL。`http` / `https` の host を含む origin（末尾の `/` は任意） |
 
 復元先のデータベース名は固定値 `misskey` です（環境変数では指定しません）。
+`MISSKEY_BASE_URL` には user/password、root 以外の path、query、fragment を含められません。
+
+## 復元後の検証
+
+リストア後に web を 1 replica で起動し、`GET /healthz` の成功を待ちます。
+続いて `POST /api/notes/global-timeline` で最新の Note を 1〜10 件取得し、
+復元データを API から参照できることを確認します。
 
 ## Kubernetes RBAC
 
