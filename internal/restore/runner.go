@@ -11,7 +11,7 @@ import (
 )
 
 // scaleTimeout bounds how long the runner waits for a workload to reach the
-// desired replica count before failing and rolling back.
+// ready replica count before failing and rolling back.
 const scaleTimeout = 5 * time.Minute
 
 // scalePollInterval is the polling period used while waiting for replicas.
@@ -48,8 +48,8 @@ type Kubernetes interface {
 	GetReplicas(ctx context.Context, cfg *config.Config, workload string) (int, error)
 	// Scale sets the replica count of the named workload.
 	Scale(ctx context.Context, cfg *config.Config, workload string, replicas int) error
-	// WaitForReplicas polls until the named workload reaches the desired
-	// replica count, failing on timeout.
+	// WaitForReplicas polls until the named workload reaches the ready replica
+	// count, failing on timeout.
 	WaitForReplicas(ctx context.Context, cfg *config.Config, workload string, want int, timeout time.Duration) error
 }
 
@@ -134,7 +134,6 @@ func (r *runner) runWithResult(ctx context.Context, cfg *config.Config, result *
 			r.recordReplicas(ctx, cfg)
 			return nil
 		}},
-		{"db connection check", r.db.CheckConnection},
 		{"s3 connection check", r.s3.CheckConnection},
 		{"kubernetes api connection check", r.k8s.CheckConnection},
 		{"s3 download + decompress", func(ctx context.Context, cfg *config.Config) error {
@@ -159,6 +158,7 @@ func (r *runner) runWithResult(ctx context.Context, cfg *config.Config, result *
 		{"wait db replicas 1", func(ctx context.Context, cfg *config.Config) error {
 			return r.k8s.WaitForReplicas(ctx, cfg, cfg.DBWorkload, 1, scaleTimeout)
 		}},
+		{"db connection check", r.db.CheckConnection},
 		{"reset database", r.db.Reset},
 		{"db restore", func(ctx context.Context, cfg *config.Config) error {
 			return r.db.Restore(ctx, cfg, dump)
