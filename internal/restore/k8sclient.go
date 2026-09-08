@@ -137,9 +137,9 @@ func (k *kubernetesClient) scaleOnce(ctx context.Context, workload string, repli
 	return "", fmt.Errorf("workload %q not found as Deployment or StatefulSet in namespace %q", workload, k.namespace)
 }
 
-// WaitForReplicas polls the actual (status) replica count of the named
-// workload until it equals want, or the timeout elapses. It fails on timeout so
-// the runner can stop and roll back.
+// WaitForReplicas polls the ready replica count of the named workload until it
+// equals want, or the timeout elapses. It fails on timeout so the runner can
+// stop and roll back.
 func (k *kubernetesClient) WaitForReplicas(ctx context.Context, _ *config.Config, workload string, want int, timeout time.Duration) error {
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
@@ -153,26 +153,26 @@ func (k *kubernetesClient) WaitForReplicas(ctx context.Context, _ *config.Config
 			return nil
 		}
 		if ctx.Err() != nil {
-			return fmt.Errorf("timed out waiting for %q replicas to become %d (last observed %d): %w", workload, want, got, ctx.Err())
+			return fmt.Errorf("timed out waiting for %q ready replicas to become %d (last observed %d): %w", workload, want, got, ctx.Err())
 		}
 		select {
 		case <-ctx.Done():
-			return fmt.Errorf("timed out waiting for %q replicas to become %d (last observed %d)", workload, want, got)
+			return fmt.Errorf("timed out waiting for %q ready replicas to become %d (last observed %d)", workload, want, got)
 		case <-ticker.C:
 		}
 	}
 }
 
-// statusReplicas returns the current actual replica count (status) of the
-// named workload, trying Deployment then StatefulSet.
+// statusReplicas returns the current ready replica count of the named
+// workload, trying Deployment then StatefulSet.
 func (k *kubernetesClient) statusReplicas(ctx context.Context, workload string) (int, error) {
 	if dep, err := k.clientset.AppsV1().Deployments(k.namespace).Get(ctx, workload, metav1.GetOptions{}); err == nil {
-		return int(dep.Status.Replicas), nil
+		return int(dep.Status.ReadyReplicas), nil
 	} else if !apierrors.IsNotFound(err) {
 		return 0, err
 	}
 	if sts, err := k.clientset.AppsV1().StatefulSets(k.namespace).Get(ctx, workload, metav1.GetOptions{}); err == nil {
-		return int(sts.Status.Replicas), nil
+		return int(sts.Status.ReadyReplicas), nil
 	} else if !apierrors.IsNotFound(err) {
 		return 0, err
 	}

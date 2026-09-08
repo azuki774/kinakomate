@@ -33,6 +33,27 @@ func (d *recordingDep) CheckConnection(_ context.Context, _ *config.Config) erro
 	return d.failOn["check"]
 }
 
+type dbRecordingDep struct{ *recordingDep }
+
+func (d *dbRecordingDep) CheckConnection(_ context.Context, _ *config.Config) error {
+	d.calls = append(d.calls, "db-check")
+	return d.failOn["db-check"]
+}
+
+type s3RecordingDep struct{ *recordingDep }
+
+func (d *s3RecordingDep) CheckConnection(_ context.Context, _ *config.Config) error {
+	d.calls = append(d.calls, "s3-check")
+	return d.failOn["s3-check"]
+}
+
+type k8sRecordingDep struct{ *recordingDep }
+
+func (d *k8sRecordingDep) CheckConnection(_ context.Context, _ *config.Config) error {
+	d.calls = append(d.calls, "k8s-check")
+	return d.failOn["k8s-check"]
+}
+
 func (d *recordingDep) DownloadAndExtract(_ context.Context, _ *config.Config) (*Dump, error) {
 	d.calls = append(d.calls, "s3-download")
 	d.lastDump = d.dump()
@@ -124,9 +145,9 @@ func testConfig() *config.Config {
 
 func newTestRunner(dep *recordingDep) *runner {
 	return &runner{
-		db:     dep,
-		s3:     dep,
-		k8s:    dep,
+		db:     &dbRecordingDep{recordingDep: dep},
+		s3:     &s3RecordingDep{recordingDep: dep},
+		k8s:    &k8sRecordingDep{recordingDep: dep},
 		api:    dep,
 		logger: log.NewWithWriter(io.Discard),
 	}
@@ -162,14 +183,14 @@ func TestRunnerRun_Order(t *testing.T) {
 	want := []string{
 		"getreplicas:misskey-web",
 		"getreplicas:misskey-db-v18",
-		"check",
-		"check",
-		"check",
+		"s3-check",
+		"k8s-check",
 		"s3-download",
 		"scale:misskey-web:0",
 		"scale:misskey-db-v18:1",
 		"wait:misskey-web:0",
 		"wait:misskey-db-v18:1",
+		"db-check",
 		"db-reset",
 		"db-restore",
 		"scale:misskey-web:1",
@@ -267,6 +288,15 @@ func TestRunnerRun_StopsOnDBReadinessFailure(t *testing.T) {
 	if !strings.Contains(err.Error(), "wait db replicas 1") {
 		t.Fatalf("error = %v, want it to mention DB readiness", err)
 	}
+	if got := countCalls(dep.calls, "db-check"); got != 0 {
+		t.Fatalf("db-check calls = %d, want none before DB readiness failure (calls: %v)", got, dep.calls)
+	}
+	assertCallTail(t, dep.calls, []string{
+		"scale:misskey-db-v18:1",
+		"wait:misskey-web:0",
+		"wait:misskey-db-v18:1",
+		"scale:misskey-web:0",
+	})
 	for _, c := range dep.calls {
 		if c == "db-reset" || c == "db-restore" {
 			t.Fatalf("calls = %v, database operations must not run before DB readiness", dep.calls)
@@ -378,19 +408,29 @@ func TestRunnerRun_StopsOnGlobalTimelineFailure(t *testing.T) {
 	assertNoCalls(t, dep.calls, "scale:misskey-db-v18:0")
 }
 
-func TestRunnerRun_FailureBeforeDownloadDoesNotPanic(t *testing.T) {
-	dep := &recordingDep{failOn: map[string]error{"check": errors.New("connection boom")}}
+func TestRunnerRun_StopsOnS3ConnectionFailure(t *testing.T) {
+	dep := &recordingDep{failOn: map[string]error{"s3-check": errors.New("connection boom")}}
 	r := newTestRunner(dep)
 
 	err := r.run(context.Background(), testConfig())
 	if err == nil {
 		t.Fatal("expected run to fail when a connection check fails")
 	}
-	if !strings.Contains(err.Error(), "db connection check") {
-		t.Fatalf("error = %v, want it to mention DB connection check", err)
+	if !strings.Contains(err.Error(), "s3 connection check") {
+		t.Fatalf("error = %v, want it to mention S3 connection check", err)
 	}
-	assertCallTail(t, dep.calls, []string{"check", "scale:misskey-web:0"})
+	assertCallTail(t, dep.calls, []string{"s3-check", "scale:misskey-web:0"})
 	assertNoCalls(t, dep.calls, "s3-download")
+}
+
+func countCalls(calls []string, want string) int {
+	count := 0
+	for _, call := range calls {
+		if call == want {
+			count++
+		}
+	}
+	return count
 }
 
 func assertCallTail(t *testing.T, calls, want []string) {

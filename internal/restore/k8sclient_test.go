@@ -29,7 +29,7 @@ func newFakeK8s(t *testing.T, webReplicas, webStatus, dbReplicas int32) *kuberne
 	web := &appsv1.Deployment{
 		ObjectMeta: metav1.ObjectMeta{Name: "web", Namespace: "default"},
 		Spec:       appsv1.DeploymentSpec{Replicas: &webReplicas},
-		Status:     appsv1.DeploymentStatus{Replicas: webStatus},
+		Status:     appsv1.DeploymentStatus{Replicas: webStatus, ReadyReplicas: webStatus},
 	}
 	db := &appsv1.StatefulSet{
 		ObjectMeta: metav1.ObjectMeta{Name: "db", Namespace: "default"},
@@ -137,6 +137,78 @@ func TestKubernetesClient_WaitForReplicas(t *testing.T) {
 	k2 := newFakeK8s(t, 2, 2, 1)
 	if err := k2.WaitForReplicas(context.Background(), &config.Config{}, "web", 0, 100*time.Millisecond); err == nil {
 		t.Fatal("WaitForReplicas(web,0) expected timeout error")
+	}
+}
+
+func TestKubernetesClient_WaitForReplicasUsesReadyReplicas(t *testing.T) {
+	tests := []struct {
+		name       string
+		workload   string
+		deployment *appsv1.Deployment
+		stateful   *appsv1.StatefulSet
+		wantErr    bool
+	}{
+		{
+			name:     "deployment not ready",
+			workload: "web",
+			deployment: &appsv1.Deployment{
+				ObjectMeta: metav1.ObjectMeta{Name: "web", Namespace: "default"},
+				Status:     appsv1.DeploymentStatus{Replicas: 1, ReadyReplicas: 0},
+			},
+			wantErr: true,
+		},
+		{
+			name:     "deployment ready",
+			workload: "web",
+			deployment: &appsv1.Deployment{
+				ObjectMeta: metav1.ObjectMeta{Name: "web", Namespace: "default"},
+				Status:     appsv1.DeploymentStatus{Replicas: 1, ReadyReplicas: 1},
+			},
+		},
+		{
+			name:     "statefulset not ready",
+			workload: "db",
+			stateful: &appsv1.StatefulSet{
+				ObjectMeta: metav1.ObjectMeta{Name: "db", Namespace: "default"},
+				Status:     appsv1.StatefulSetStatus{Replicas: 1, ReadyReplicas: 0},
+			},
+			wantErr: true,
+		},
+		{
+			name:     "statefulset ready",
+			workload: "db",
+			stateful: &appsv1.StatefulSet{
+				ObjectMeta: metav1.ObjectMeta{Name: "db", Namespace: "default"},
+				Status:     appsv1.StatefulSetStatus{Replicas: 1, ReadyReplicas: 1},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var objects []runtime.Object
+			if tt.deployment != nil {
+				objects = append(objects, tt.deployment)
+			}
+			if tt.stateful != nil {
+				objects = append(objects, tt.stateful)
+			}
+			k := &kubernetesClient{clientset: fake.NewSimpleClientset(objects...), namespace: "default"}
+
+			err := k.WaitForReplicas(context.Background(), &config.Config{}, tt.workload, 1, 100*time.Millisecond)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatal("WaitForReplicas expected timeout error")
+				}
+				if !strings.Contains(err.Error(), "ready replicas") {
+					t.Fatalf("WaitForReplicas error = %v, want ready replicas diagnostic", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("WaitForReplicas unexpected error: %v", err)
+			}
+		})
 	}
 }
 
