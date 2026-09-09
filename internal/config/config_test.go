@@ -3,6 +3,7 @@ package config
 import (
 	"strings"
 	"testing"
+	"time"
 )
 
 func setEnv(t *testing.T, env map[string]string) {
@@ -215,6 +216,57 @@ func TestLoadFromEnv_Success(t *testing.T) {
 		t.Errorf("S3 = (%q,%q), want (backups, misskey/daily/dump.sql.gz)",
 			cfg.S3Bucket, cfg.S3Key)
 	}
+	if cfg.GTLRequestTimeout != DefaultGTLRequestTimeout {
+		t.Errorf("GTLRequestTimeout = %v, want %v", cfg.GTLRequestTimeout, DefaultGTLRequestTimeout)
+	}
+	if cfg.GTLRetryInterval != DefaultGTLRetryInterval {
+		t.Errorf("GTLRetryInterval = %v, want %v", cfg.GTLRetryInterval, DefaultGTLRetryInterval)
+	}
+	if cfg.GTLRetryTimeout != DefaultGTLRetryTimeout {
+		t.Errorf("GTLRetryTimeout = %v, want %v", cfg.GTLRetryTimeout, DefaultGTLRetryTimeout)
+	}
+}
+
+func TestLoadFromEnv_GTLSettingsCanBeOverridden(t *testing.T) {
+	env := validEnv()
+	env["MISSKEY_GTL_REQUEST_TIMEOUT_SECONDS"] = "11"
+	env["MISSKEY_GTL_RETRY_INTERVAL_SECONDS"] = "13"
+	env["MISSKEY_GTL_RETRY_TIMEOUT_SECONDS"] = "317"
+	setEnv(t, env)
+
+	cfg, err := LoadFromEnv()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.GTLRequestTimeout != 11*time.Second || cfg.GTLRetryInterval != 13*time.Second || cfg.GTLRetryTimeout != 317*time.Second {
+		t.Fatalf("GTL settings = (%v, %v, %v), want (11s, 13s, 317s)", cfg.GTLRequestTimeout, cfg.GTLRetryInterval, cfg.GTLRetryTimeout)
+	}
+}
+
+func TestLoadFromEnv_InvalidGTLSettings(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		env   string
+		value string
+	}{
+		{name: "request timeout zero", env: "MISSKEY_GTL_REQUEST_TIMEOUT_SECONDS", value: "0"},
+		{name: "retry interval negative", env: "MISSKEY_GTL_RETRY_INTERVAL_SECONDS", value: "-1"},
+		{name: "retry timeout decimal", env: "MISSKEY_GTL_RETRY_TIMEOUT_SECONDS", value: "1.5"},
+		{name: "retry timeout duration overflow", env: "MISSKEY_GTL_RETRY_TIMEOUT_SECONDS", value: "9223372037"},
+		{name: "request timeout overflow", env: "MISSKEY_GTL_REQUEST_TIMEOUT_SECONDS", value: "9223372036854775808"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			env := validEnv()
+			env[tc.env] = tc.value
+			setEnv(t, env)
+
+			if _, err := LoadFromEnv(); err == nil {
+				t.Fatalf("expected error for %s=%q", tc.env, tc.value)
+			} else if !strings.Contains(err.Error(), tc.env) {
+				t.Fatalf("error %q does not identify %s", err, tc.env)
+			}
+		})
+	}
 }
 
 func TestConfig_Loggable_OmitsPassword(t *testing.T) {
@@ -238,5 +290,8 @@ func TestConfig_Loggable_OmitsPassword(t *testing.T) {
 	}
 	if loggable["misskey_base_url"] != "https://misskey.example/" {
 		t.Error("Loggable should include misskey_base_url")
+	}
+	if _, ok := loggable["gtl_request_timeout_seconds"]; !ok {
+		t.Error("Loggable should include GTL settings")
 	}
 }
