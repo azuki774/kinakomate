@@ -5,12 +5,26 @@ import (
 	"net/url"
 	"os"
 	"regexp"
+	"strconv"
 	"strings"
+	"time"
 )
 
 // DBName is the fixed target database name. It is a constant (not an input)
 // because the restore verification always targets the same database.
 const DBName = "misskey"
+
+const (
+	// DefaultGTLRequestTimeout is the per-request timeout for the global
+	// timeline check.
+	DefaultGTLRequestTimeout = 10 * time.Second
+	// DefaultGTLRetryInterval is the wait between retryable global timeline
+	// failures.
+	DefaultGTLRetryInterval = 30 * time.Second
+	// DefaultGTLRetryTimeout is the total time allowed for the global timeline
+	// check, including requests and retry waits.
+	DefaultGTLRetryTimeout = 5 * time.Minute
+)
 
 // workloadNameRegexp matches a valid RFC 1123 label, which is the form
 // Kubernetes workload names take.
@@ -59,6 +73,14 @@ type Config struct {
 	DBPass string
 	// DBName is always DBName; it is not taken from the environment.
 	DBName string
+
+	// GTLRequestTimeout is the maximum duration of one global timeline request.
+	GTLRequestTimeout time.Duration
+	// GTLRetryInterval is the wait between retryable global timeline failures.
+	GTLRetryInterval time.Duration
+	// GTLRetryTimeout is the total duration allowed for the global timeline
+	// check, including requests and retry waits.
+	GTLRetryTimeout time.Duration
 }
 
 // requiredEnv maps each required input to its environment variable name.
@@ -124,7 +146,37 @@ func LoadFromEnv() (*Config, error) {
 		DBPass:         values["DB_PASS"],
 		DBName:         DBName,
 	}
+	for _, setting := range []struct {
+		envName string
+		def     time.Duration
+		assign  func(time.Duration)
+	}{
+		{"MISSKEY_GTL_REQUEST_TIMEOUT_SECONDS", DefaultGTLRequestTimeout, func(v time.Duration) { cfg.GTLRequestTimeout = v }},
+		{"MISSKEY_GTL_RETRY_INTERVAL_SECONDS", DefaultGTLRetryInterval, func(v time.Duration) { cfg.GTLRetryInterval = v }},
+		{"MISSKEY_GTL_RETRY_TIMEOUT_SECONDS", DefaultGTLRetryTimeout, func(v time.Duration) { cfg.GTLRetryTimeout = v }},
+	} {
+		value, err := positiveSecondsFromEnv(setting.envName, setting.def)
+		if err != nil {
+			return nil, err
+		}
+		setting.assign(value)
+	}
 	return cfg, nil
+}
+
+func positiveSecondsFromEnv(name string, defaultValue time.Duration) (time.Duration, error) {
+	raw := strings.TrimSpace(os.Getenv(name))
+	if raw == "" {
+		return defaultValue, nil
+	}
+	seconds, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil || seconds <= 0 {
+		return 0, fmt.Errorf("%s must be a positive integer number of seconds", name)
+	}
+	if seconds > int64(time.Duration(1<<63-1)/time.Second) {
+		return 0, fmt.Errorf("%s is too large", name)
+	}
+	return time.Duration(seconds) * time.Second, nil
 }
 
 func validateMisskeyBaseURL(raw string) error {
@@ -178,16 +230,19 @@ func validateS3Endpoint(raw string) error {
 // It omits the secret database password.
 func (c *Config) Loggable() map[string]any {
 	return map[string]any{
-		"web_workload":     c.WebWorkload,
-		"db_workload":      c.DBWorkload,
-		"misskey_base_url": c.MisskeyBaseURL,
-		"s3_endpoint":      c.S3Endpoint,
-		"s3_region":        c.S3Region,
-		"s3_bucket":        c.S3Bucket,
-		"s3_key":           c.S3Key,
-		"db_host":          c.DBHost,
-		"db_port":          c.DBPort,
-		"db_user":          c.DBUser,
-		"db_name":          c.DBName,
+		"web_workload":                c.WebWorkload,
+		"db_workload":                 c.DBWorkload,
+		"misskey_base_url":            c.MisskeyBaseURL,
+		"s3_endpoint":                 c.S3Endpoint,
+		"s3_region":                   c.S3Region,
+		"s3_bucket":                   c.S3Bucket,
+		"s3_key":                      c.S3Key,
+		"db_host":                     c.DBHost,
+		"db_port":                     c.DBPort,
+		"db_user":                     c.DBUser,
+		"db_name":                     c.DBName,
+		"gtl_request_timeout_seconds": int64(c.GTLRequestTimeout / time.Second),
+		"gtl_retry_interval_seconds":  int64(c.GTLRetryInterval / time.Second),
+		"gtl_retry_timeout_seconds":   int64(c.GTLRetryTimeout / time.Second),
 	}
 }

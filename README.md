@@ -26,6 +26,9 @@
 | `DB_USER` | yes | 復元先 PostgreSQL の user |
 | `DB_PASS` | yes | 復元先 PostgreSQL の password（ログに出さない） |
 | `MISSKEY_BASE_URL` | yes | 復元確認対象の Misskey URL。`http` / `https` の host を含む origin（末尾の `/` は任意） |
+| `MISSKEY_GTL_REQUEST_TIMEOUT_SECONDS` | no | GTL 1回あたりのHTTP処理タイムアウト（秒）。既定値 `10` |
+| `MISSKEY_GTL_RETRY_INTERVAL_SECONDS` | no | GTLの再試行前に待機する秒数。既定値 `30` |
+| `MISSKEY_GTL_RETRY_TIMEOUT_SECONDS` | no | GTLの初回試行開始から、HTTP処理と待機を含めた最大再試行時間（秒）。既定値 `300` |
 
 復元先のデータベース名は固定値 `misskey` です（環境変数では指定しません）。
 `MISSKEY_BASE_URL` には user/password、root 以外の path、query、fragment を含められません。
@@ -35,6 +38,11 @@
 リストア後に web を 1 replica で起動し、`GET /healthz` の成功を待ちます。
 続いて `POST /api/notes/global-timeline` で最新の Note を 1〜10 件取得し、
 復元データを API から参照できることを確認します。
+GTL は1回あたり10秒（`MISSKEY_GTL_REQUEST_TIMEOUT_SECONDS`）で実行し、
+DBのコールドキャッシュなどによるDB timeout、HTTP 5xx、通信エラーまたは通信timeout
+の場合だけ、30秒（`MISSKEY_GTL_RETRY_INTERVAL_SECONDS`）待って再試行します。
+初回試行から5分（`MISSKEY_GTL_RETRY_TIMEOUT_SECONDS`）を過ぎると失敗します。
+HTTP 4xx/3xxやレスポンス形式不正は再試行しません。3つの環境変数は正の整数秒で指定します。
 
 ## Kubernetes RBAC
 

@@ -180,7 +180,7 @@ func TestMisskeyAPICheckGlobalTimelinePostsAndValidatesNotes(t *testing.T) {
 
 	requests := make(chan *http.Request, 1)
 	api := newMisskeyAPI()
-	api.requestTimeout = 50 * time.Millisecond
+	api.gtlRequestTimeout = 50 * time.Millisecond
 	api.client.Transport = roundTripFunc(func(request *http.Request) (*http.Response, error) {
 		requests <- request.Clone(request.Context())
 		return response(http.StatusOK, `[{"id":"note-1","createdAt":"2026-09-05T12:00:00Z"}]`), nil
@@ -214,11 +214,197 @@ func TestMisskeyAPICheckGlobalTimelinePostsAndValidatesNotes(t *testing.T) {
 		deadline, ok := request.Context().Deadline()
 		if !ok {
 			t.Error("request has no deadline")
-		} else if until := time.Until(deadline); until <= 0 || until > api.requestTimeout {
-			t.Errorf("request deadline is in %v, want within (0, %v]", until, api.requestTimeout)
+		} else if until := time.Until(deadline); until <= 0 || until > api.gtlRequestTimeout {
+			t.Errorf("request deadline is in %v, want within (0, %v]", until, api.gtlRequestTimeout)
 		}
 	default:
 		t.Fatal("server did not receive a request")
+	}
+}
+
+func TestMisskeyAPICheckGlobalTimelineRetriesServerErrors(t *testing.T) {
+	t.Parallel()
+
+	var attempts atomic.Int32
+	api := newMisskeyAPI()
+	api.gtlRetryInterval = time.Millisecond
+	api.gtlRetryTimeout = time.Second
+	api.client.Transport = roundTripFunc(func(_ *http.Request) (*http.Response, error) {
+		if attempts.Add(1) == 1 {
+			return response(http.StatusServiceUnavailable, "server unavailable"), nil
+		}
+		return response(http.StatusOK, `[{"id":"note-1","createdAt":"2026-09-05T12:00:00Z"}]`), nil
+	})
+
+	if err := api.CheckGlobalTimeline(context.Background(), &config.Config{MisskeyBaseURL: "https://example.test"}); err != nil {
+		t.Fatalf("CheckGlobalTimeline() error = %v", err)
+	}
+	if got := attempts.Load(); got != 2 {
+		t.Fatalf("attempts = %d, want 2", got)
+	}
+}
+
+func TestMisskeyAPICheckGlobalTimelineRetriesTransportErrors(t *testing.T) {
+	t.Parallel()
+
+	var attempts atomic.Int32
+	api := newMisskeyAPI()
+	api.gtlRetryInterval = time.Millisecond
+	api.gtlRetryTimeout = time.Second
+	api.client.Transport = roundTripFunc(func(_ *http.Request) (*http.Response, error) {
+		if attempts.Add(1) == 1 {
+			return nil, errors.New("connection reset by peer")
+		}
+		return response(http.StatusOK, `[{"id":"note-1","createdAt":"2026-09-05T12:00:00Z"}]`), nil
+	})
+
+	if err := api.CheckGlobalTimeline(context.Background(), &config.Config{MisskeyBaseURL: "https://example.test"}); err != nil {
+		t.Fatalf("CheckGlobalTimeline() error = %v", err)
+	}
+	if got := attempts.Load(); got != 2 {
+		t.Fatalf("attempts = %d, want 2", got)
+	}
+}
+
+func TestMisskeyAPICheckGlobalTimelineDoesNotRetryClientErrorsOrInvalidResponses(t *testing.T) {
+	t.Parallel()
+
+	for _, test := range []struct {
+		name   string
+		status int
+		body   string
+	}{
+		{name: "client error", status: http.StatusBadRequest, body: "bad request"},
+		{name: "redirect", status: http.StatusFound, body: "redirect"},
+		{name: "invalid response", status: http.StatusOK, body: "not json"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var attempts atomic.Int32
+			api := newMisskeyAPI()
+			api.gtlRetryInterval = time.Millisecond
+			api.gtlRetryTimeout = time.Second
+			api.client.Transport = roundTripFunc(func(_ *http.Request) (*http.Response, error) {
+				attempts.Add(1)
+				return response(test.status, test.body), nil
+			})
+
+			if err := api.CheckGlobalTimeline(context.Background(), &config.Config{MisskeyBaseURL: "https://example.test"}); err == nil {
+				t.Fatal("CheckGlobalTimeline() error = nil, want error")
+			}
+			if got := attempts.Load(); got != 1 {
+				t.Fatalf("attempts = %d, want 1", got)
+			}
+		})
+	}
+}
+
+func TestMisskeyAPICheckGlobalTimelineStatusBoundariesAndClosesBodies(t *testing.T) {
+	t.Parallel()
+
+	t.Run("5xx retries and closes body before 4xx failure", func(t *testing.T) {
+		serverErrorBody := &trackingReadCloser{Reader: strings.NewReader("server error")}
+		clientErrorBody := &trackingReadCloser{Reader: strings.NewReader("client error")}
+		bodies := []*trackingReadCloser{serverErrorBody, clientErrorBody}
+		var attempts atomic.Int32
+		api := newMisskeyAPI()
+		api.gtlRetryInterval = time.Millisecond
+		api.gtlRetryTimeout = time.Second
+		api.client.Transport = roundTripFunc(func(_ *http.Request) (*http.Response, error) {
+			index := int(attempts.Add(1)) - 1
+			status := http.StatusInternalServerError
+			if index == 1 {
+				status = http.StatusBadRequest
+			}
+			return &http.Response{StatusCode: status, Body: bodies[index]}, nil
+		})
+
+		if err := api.CheckGlobalTimeline(context.Background(), &config.Config{MisskeyBaseURL: "https://example.test"}); err == nil {
+			t.Fatal("CheckGlobalTimeline() error = nil, want HTTP 4xx error")
+		}
+		if got := attempts.Load(); got != 2 {
+			t.Fatalf("attempts = %d, want 2", got)
+		}
+		if !serverErrorBody.closed.Load() {
+			t.Error("5xx response body was not closed")
+		}
+		if !clientErrorBody.closed.Load() {
+			t.Error("4xx response body was not closed")
+		}
+	})
+
+	t.Run("600 fails immediately and closes body", func(t *testing.T) {
+		body := &trackingReadCloser{Reader: strings.NewReader("unknown status")}
+		var attempts atomic.Int32
+		api := newMisskeyAPI()
+		api.gtlRetryInterval = time.Millisecond
+		api.gtlRetryTimeout = time.Second
+		api.client.Transport = roundTripFunc(func(_ *http.Request) (*http.Response, error) {
+			attempts.Add(1)
+			return &http.Response{StatusCode: 600, Body: body}, nil
+		})
+
+		if err := api.CheckGlobalTimeline(context.Background(), &config.Config{MisskeyBaseURL: "https://example.test"}); err == nil {
+			t.Fatal("CheckGlobalTimeline() error = nil, want unknown status error")
+		}
+		if got := attempts.Load(); got != 1 {
+			t.Fatalf("attempts = %d, want 1", got)
+		}
+		if !body.closed.Load() {
+			t.Error("600 response body was not closed")
+		}
+	})
+}
+
+func TestMisskeyAPICheckGlobalTimelineRetryTimeoutIncludesWait(t *testing.T) {
+	t.Parallel()
+
+	var attempts atomic.Int32
+	api := newMisskeyAPI()
+	api.gtlRetryInterval = time.Hour
+	api.gtlRetryTimeout = 10 * time.Millisecond
+	api.client.Transport = roundTripFunc(func(_ *http.Request) (*http.Response, error) {
+		attempts.Add(1)
+		return response(http.StatusServiceUnavailable, "server unavailable"), nil
+	})
+
+	err := api.CheckGlobalTimeline(context.Background(), &config.Config{MisskeyBaseURL: "https://example.test"})
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("CheckGlobalTimeline() error = %v, want deadline exceeded", err)
+	}
+	if got := attempts.Load(); got != 1 {
+		t.Fatalf("attempts = %d, want 1 while waiting for retry", got)
+	}
+}
+
+func TestMisskeyAPICheckGlobalTimelineRetriesBodyReadTimeout(t *testing.T) {
+	t.Parallel()
+
+	started := make(chan struct{}, 1)
+	var attempts atomic.Int32
+	api := newMisskeyAPI()
+	api.gtlRequestTimeout = 5 * time.Millisecond
+	api.gtlRetryInterval = time.Millisecond
+	api.gtlRetryTimeout = time.Second
+	api.client.Transport = roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		if attempts.Add(1) == 1 {
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Body:       &contextAwareReadCloser{ctx: request.Context(), started: started},
+			}, nil
+		}
+		return response(http.StatusOK, `[{"id":"note-1","createdAt":"2026-09-05T12:00:00Z"}]`), nil
+	})
+
+	if err := api.CheckGlobalTimeline(context.Background(), &config.Config{MisskeyBaseURL: "https://example.test"}); err != nil {
+		t.Fatalf("CheckGlobalTimeline() error = %v", err)
+	}
+	select {
+	case <-started:
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("first timeline response body was not read")
+	}
+	if got := attempts.Load(); got != 2 {
+		t.Fatalf("attempts = %d, want 2", got)
 	}
 }
 
@@ -284,6 +470,15 @@ func TestMisskeyAPIConstructorDoesNotFollowRedirectsOrDisableTLSVerification(t *
 	if api.requestTimeout != 10*time.Second {
 		t.Errorf("requestTimeout = %v, want 10s", api.requestTimeout)
 	}
+	if api.gtlRequestTimeout != config.DefaultGTLRequestTimeout {
+		t.Errorf("gtlRequestTimeout = %v, want %v", api.gtlRequestTimeout, config.DefaultGTLRequestTimeout)
+	}
+	if api.gtlRetryInterval != config.DefaultGTLRetryInterval {
+		t.Errorf("gtlRetryInterval = %v, want %v", api.gtlRetryInterval, config.DefaultGTLRetryInterval)
+	}
+	if api.gtlRetryTimeout != config.DefaultGTLRetryTimeout {
+		t.Errorf("gtlRetryTimeout = %v, want %v", api.gtlRetryTimeout, config.DefaultGTLRetryTimeout)
+	}
 	if api.client.Transport != nil {
 		t.Fatal("client Transport is configured; want the secure default transport")
 	}
@@ -301,7 +496,7 @@ func TestMisskeyAPICheckGlobalTimelineRejectsInvalidResponsesWithoutLeakingBody(
 		status int
 		body   string
 	}{
-		{"non-2xx", http.StatusServiceUnavailable, "private note body"},
+		{"non-2xx", http.StatusBadRequest, "private note body"},
 		{"invalid JSON", http.StatusOK, "private note body"},
 		{"non-array", http.StatusOK, validNote},
 		{"empty array", http.StatusOK, "[]"},
@@ -405,7 +600,9 @@ func TestMisskeyAPICheckGlobalTimelineReturnsRequestDeadlineDuringBodyRead(t *te
 
 	started := make(chan struct{}, 1)
 	api := newMisskeyAPI()
-	api.requestTimeout = 5 * time.Millisecond
+	api.gtlRequestTimeout = 5 * time.Millisecond
+	api.gtlRetryInterval = time.Millisecond
+	api.gtlRetryTimeout = 20 * time.Millisecond
 	api.client.Transport = roundTripFunc(func(request *http.Request) (*http.Response, error) {
 		return &http.Response{
 			StatusCode: http.StatusOK,
@@ -437,7 +634,7 @@ func TestMisskeyAPICheckGlobalTimelineReturnsParentCancellationDuringBodyRead(t 
 
 	started := make(chan struct{}, 1)
 	api := newMisskeyAPI()
-	api.requestTimeout = time.Hour
+	api.gtlRequestTimeout = time.Hour
 	api.client.Transport = roundTripFunc(func(request *http.Request) (*http.Response, error) {
 		return &http.Response{
 			StatusCode: http.StatusOK,
