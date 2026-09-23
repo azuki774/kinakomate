@@ -29,6 +29,7 @@
 | `MISSKEY_GTL_REQUEST_TIMEOUT_SECONDS` | no | GTL 1回あたりのHTTP処理タイムアウト（秒）。既定値 `10` |
 | `MISSKEY_GTL_RETRY_INTERVAL_SECONDS` | no | GTLの再試行前に待機する秒数。既定値 `30` |
 | `MISSKEY_GTL_RETRY_TIMEOUT_SECONDS` | no | GTLの初回試行開始から、HTTP処理と待機を含めた最大再試行時間（秒）。既定値 `300` |
+| `DISCORD_NOTIFICATION_WEBHOOK` | no | restore-test の成功／失敗を通知する Discord webhook URL。未設定なら通知しない（ログに出さない） |
 
 復元先のデータベース名は固定値 `misskey` です（環境変数では指定しません）。
 `MISSKEY_BASE_URL` には user/password、root 以外の path、query、fragment を含められません。

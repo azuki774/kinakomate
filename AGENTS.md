@@ -24,8 +24,8 @@ kinakomate は misskey 系サービスの運用ツール群を開発するリポ
 - **Linter**: `golangci-lint` を使用する。
 - **スコープ**:
   - 本リポジトリは復元・検証ロジック自体（runner）とそのビルド・CI・文書化を扱う。
-  - デプロイ対象の作成・変更（CronJob・manifest・RBAC・Secret）、Kubernetes リソースの直接操作、S3 オブジェクトの作成・更新・削除、ネットワークの外部公開、通知送信、ブラウザ／スクリーンショット取得は **runner の責務外**。これらは別のインフラ定義リポジトリ側で管理する。
-- **認証情報**: runner はデプロイ時に注入される外部ストレージへの read-only 認証情報（環境変数）のみを利用し、Kubernetes API から直接 Secret を取得しない。
+  - デプロイ対象の作成・変更（CronJob・manifest・RBAC・Secret）、Kubernetes リソースの直接操作、S3 オブジェクトの作成・更新・削除、ネットワークの外部公開、ブラウザ／スクリーンショット取得は **runner の責務外**。これらは別のインフラ定義リポジトリ側で管理する。restore-test の Discord webhook 通知は runner の責務に含む。
+- **認証情報**: runner はデプロイ時に注入される外部ストレージへの read-only 認証情報と任意の Discord webhook URL（いずれも環境変数）のみを利用し、Kubernetes API から直接 Secret を取得しない。
 
 ## 検証コマンド
 
