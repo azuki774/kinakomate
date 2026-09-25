@@ -13,7 +13,9 @@ import (
 )
 
 // This opt-in test uses a uniquely named login role and database, and removes
-// both when done. CI runs it against a disposable PostgreSQL service.
+// both when done. Run it manually against a disposable PostgreSQL instance with
+// ANALYZE_INTEGRATION=1 and PGHOST/PGPORT/PGUSER/PGPASSWORD set for an admin login.
+// Ordinary test runs skip it and require neither PostgreSQL nor psql.
 func TestAnalyzePostgresIntegration(t *testing.T) {
 	if os.Getenv("ANALYZE_INTEGRATION") != "1" {
 		t.Skip("set ANALYZE_INTEGRATION=1 to run PostgreSQL integration test")
