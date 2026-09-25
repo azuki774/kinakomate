@@ -15,6 +15,9 @@ import (
 const DBName = "misskey"
 
 const (
+	// DefaultDBAnalyzeTimeout is the maximum duration of the post-restore
+	// PostgreSQL ANALYZE operation.
+	DefaultDBAnalyzeTimeout = 15 * time.Minute
 	// DefaultGTLRequestTimeout is the per-request timeout for the global
 	// timeline check.
 	DefaultGTLRequestTimeout = 10 * time.Second
@@ -73,6 +76,9 @@ type Config struct {
 	DBPass string
 	// DBName is always DBName; it is not taken from the environment.
 	DBName string
+
+	// DBAnalyzeTimeout is the maximum duration of the post-restore ANALYZE.
+	DBAnalyzeTimeout time.Duration
 
 	// GTLRequestTimeout is the maximum duration of one global timeline request.
 	GTLRequestTimeout time.Duration
@@ -151,6 +157,7 @@ func LoadFromEnv() (*Config, error) {
 		def     time.Duration
 		assign  func(time.Duration)
 	}{
+		{"DB_ANALYZE_TIMEOUT_SECONDS", DefaultDBAnalyzeTimeout, func(v time.Duration) { cfg.DBAnalyzeTimeout = v }},
 		{"MISSKEY_GTL_REQUEST_TIMEOUT_SECONDS", DefaultGTLRequestTimeout, func(v time.Duration) { cfg.GTLRequestTimeout = v }},
 		{"MISSKEY_GTL_RETRY_INTERVAL_SECONDS", DefaultGTLRetryInterval, func(v time.Duration) { cfg.GTLRetryInterval = v }},
 		{"MISSKEY_GTL_RETRY_TIMEOUT_SECONDS", DefaultGTLRetryTimeout, func(v time.Duration) { cfg.GTLRetryTimeout = v }},
@@ -160,6 +167,10 @@ func LoadFromEnv() (*Config, error) {
 			return nil, err
 		}
 		setting.assign(value)
+	}
+	// PostgreSQL statement_timeout is a signed 32-bit number of milliseconds.
+	if cfg.DBAnalyzeTimeout.Milliseconds() > 1<<31-1 {
+		return nil, fmt.Errorf("DB_ANALYZE_TIMEOUT_SECONDS must not exceed 2147483")
 	}
 	return cfg, nil
 }
@@ -241,6 +252,7 @@ func (c *Config) Loggable() map[string]any {
 		"db_port":                     c.DBPort,
 		"db_user":                     c.DBUser,
 		"db_name":                     c.DBName,
+		"db_analyze_timeout_seconds":  int64(c.DBAnalyzeTimeout / time.Second),
 		"gtl_request_timeout_seconds": int64(c.GTLRequestTimeout / time.Second),
 		"gtl_retry_interval_seconds":  int64(c.GTLRetryInterval / time.Second),
 		"gtl_retry_timeout_seconds":   int64(c.GTLRetryTimeout / time.Second),

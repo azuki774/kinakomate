@@ -25,6 +25,7 @@
 | `DB_PORT` | yes | 復元先 PostgreSQL の port |
 | `DB_USER` | yes | 復元先 PostgreSQL の user |
 | `DB_PASS` | yes | 復元先 PostgreSQL の password（ログに出さない） |
+| `DB_ANALYZE_TIMEOUT_SECONDS` | no | 復元後の `ANALYZE` の最大時間（秒）。既定値 `900`（15分）、範囲 `1`〜`2147483` |
 | `MISSKEY_BASE_URL` | yes | 復元確認対象の Misskey URL。`http` / `https` の host を含む origin（末尾の `/` は任意） |
 | `MISSKEY_GTL_REQUEST_TIMEOUT_SECONDS` | no | GTL 1回あたりのHTTP処理タイムアウト（秒）。既定値 `10` |
 | `MISSKEY_GTL_RETRY_INTERVAL_SECONDS` | no | GTLの再試行前に待機する秒数。既定値 `30` |
@@ -34,9 +35,23 @@
 復元先のデータベース名は固定値 `misskey` です（環境変数では指定しません）。
 `MISSKEY_BASE_URL` には user/password、root 以外の path、query、fragment を含められません。
 
-## 復元後の検証
+## 復元後の ANALYZE と検証
 
-リストア後に web を 1 replica で起動し、`GET /healthz` の成功を待ちます。
+SQL ダンプの復元に成功すると、web 起動前に復元先 DB へ別の `psql` 接続を開き、
+`ANALYZE` を実行して planner 統計情報を更新します。ダンプには含まれない統計情報を
+アプリケーション起動前に作成し、統計情報不足による GTL クエリの遅延・タイムアウトを
+抑えることが目的です。アプリケーションの readiness と GTL の成功は引き続き API で検証します。
+この処理全体は `DB_ANALYZE_TIMEOUT_SECONDS` で指定した時間（既定15分）を超えると失敗します。
+PostgreSQL の `statement_timeout` は同じ値、`lock_timeout` はその値と30秒のうち
+短い方に設定します。どちらもこの `psql` セッションだけに適用され、DB に永続化されません。
+システムスキーマ（`pg_*` と `information_schema`）を除き、通常テーブル、
+パーティションテーブル、マテリアライズドビューを個別に ANALYZE します。
+識別子は PostgreSQL 側で引用して組み立てるため、引用符を含む名前にも対応します。
+`DB_USER` に superuser 権限は不要です。`psql` が成功終了しても stderr に空白以外の
+出力があれば警告を含む診断とみなして失敗させます。権限不足などで統計情報を更新
+できないテーブルなどを見逃さないためです。
+
+ANALYZE に成功した後、web を 1 replica で起動し、`GET /healthz` の成功を待ちます。
 続いて `POST /api/notes/global-timeline` で最新の Note を 1〜10 件取得し、
 復元データを API から参照できることを確認します。
 GTL は1回あたり10秒（`MISSKEY_GTL_REQUEST_TIMEOUT_SECONDS`）で実行し、
@@ -95,7 +110,7 @@ runner を向けた環境では対象 DB 内のデータは常に失われます
 
 - `preflight`: 入力検証と runner 初期化
 - `prepare`: 接続確認、レプリカ確認、S3 object の取得・検証
-- `restore`: web／DB の scale、DB 初期化、PostgreSQL 復元
+- `restore`: web／DB の scale、DB 初期化、PostgreSQL 復元と `ANALYZE`
 - `verify`: web 起動と checks
 - `cleanup`: 成功時の web／DB 停止。失敗時は web を 0 replica に戻す復旧
 
@@ -105,7 +120,7 @@ runner を向けた環境では対象 DB 内のデータは常に失われます
 場合は `object.bucket`、`object.key`、`object.etag`、`object.size` も記録します。
 ローカルの一時ファイルパス、`DB_PASS`、AWS credential はログへ出力しません。
 
-全フェーズ成功時の終了コードは `0` です。入力検証、初期化、復元、checks、
+全フェーズ成功時の終了コードは `0` です。入力検証、初期化、復元、`ANALYZE`、checks、
 cleanup のいずれかが失敗した場合は非 `0` になります。初期化後の失敗時は
 調査用に DB 側を停止せず、web だけを 0 replica に戻します。
 

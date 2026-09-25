@@ -11,6 +11,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/azuki774/kinakomate/internal/config"
 	"github.com/azuki774/kinakomate/internal/log"
@@ -165,6 +166,176 @@ func TestRestore_InvalidGzip(t *testing.T) {
 	}
 	if *called {
 		t.Fatal("psql must not be invoked when the gzip stream is invalid")
+	}
+}
+
+func TestAnalyze_UsesTargetDatabaseAndSessionTimeouts(t *testing.T) {
+	cfg := &config.Config{
+		DBHost:           "db",
+		DBPort:           "5432",
+		DBUser:           "misskey",
+		DBPass:           "secret",
+		DBName:           "restored_target",
+		DBAnalyzeTimeout: 45 * time.Second,
+	}
+	var got psqlInvocation
+	db := &database{runPsql: func(_ context.Context, _ *config.Config, inv psqlInvocation) (string, error) {
+		got = inv
+		return "", nil
+	}}
+
+	if err := db.Analyze(context.Background(), cfg); err != nil {
+		t.Fatalf("Analyze returned error: %v", err)
+	}
+	if got.DBName != cfg.DBName {
+		t.Errorf("analyze DBName = %q, want target database %q", got.DBName, cfg.DBName)
+	}
+	if got.Stdin == nil {
+		t.Fatal("ANALYZE must stream its generated SQL script via stdin")
+	}
+	script, _ := io.ReadAll(got.Stdin)
+	for _, fragment := range []string{
+		"SET statement_timeout = '45000ms'", "SET lock_timeout = '30000ms'",
+		"format('ANALYZE %I.%I;'", "n.nspname <> 'information_schema'",
+		"n.nspname !~ '^pg_'", "c.relkind IN ('r', 'p', 'm')", "ORDER BY n.nspname, c.relname\n\\gexec",
+	} {
+		if !strings.Contains(string(script), fragment) {
+			t.Errorf("ANALYZE script missing %q: %s", fragment, script)
+		}
+	}
+	if got.SingleTransaction {
+		t.Error("ANALYZE must use a separate psql session without --single-transaction")
+	}
+	if got.Command != "" {
+		t.Error("ANALYZE script should not be passed as a command-line argument")
+	}
+}
+
+func TestAnalyze_ZeroTimeoutConfigUsesDefault(t *testing.T) {
+	cfg := &config.Config{DBName: config.DBName}
+	var got psqlInvocation
+	db := &database{runPsql: func(_ context.Context, _ *config.Config, inv psqlInvocation) (string, error) {
+		got = inv
+		return "", nil
+	}}
+
+	if err := db.Analyze(context.Background(), cfg); err != nil {
+		t.Fatalf("Analyze returned error: %v", err)
+	}
+	if got.Stdin == nil {
+		t.Fatal("expected ANALYZE script via stdin")
+	}
+	script, _ := io.ReadAll(got.Stdin)
+	if !strings.Contains(string(script), "statement_timeout = '900000ms'") || !strings.Contains(string(script), "lock_timeout = '30000ms'") {
+		t.Errorf("ANALYZE script = %q, want default timeouts", script)
+	}
+}
+
+func TestAnalyze_UsesShorterAnalyzeTimeoutForLockTimeout(t *testing.T) {
+	cfg := &config.Config{DBName: config.DBName, DBAnalyzeTimeout: 7 * time.Second}
+	var got psqlInvocation
+	db := &database{runPsql: func(_ context.Context, _ *config.Config, inv psqlInvocation) (string, error) {
+		got = inv
+		return "", nil
+	}}
+
+	if err := db.Analyze(context.Background(), cfg); err != nil {
+		t.Fatalf("Analyze returned error: %v", err)
+	}
+	if got.Stdin == nil {
+		t.Fatal("expected ANALYZE script via stdin")
+	}
+	script, _ := io.ReadAll(got.Stdin)
+	if !strings.Contains(string(script), "statement_timeout = '7000ms'") || !strings.Contains(string(script), "lock_timeout = '7000ms'") {
+		t.Errorf("ANALYZE script = %q, want shorter timeouts", script)
+	}
+}
+
+func TestAnalyze_RejectsStderrDiagnosticsWithoutExposingThem(t *testing.T) {
+	diagnostic := "WARNING: skipping table containing sensitive data"
+	db := &database{runPsql: func(context.Context, *config.Config, psqlInvocation) (string, error) {
+		return " \n" + diagnostic + " \n", nil
+	}}
+
+	err := db.Analyze(context.Background(), &config.Config{DBName: config.DBName})
+	if err == nil {
+		t.Fatal("Analyze succeeded despite psql stderr diagnostics")
+	}
+	if strings.Contains(err.Error(), diagnostic) || strings.Contains(err.Error(), "sensitive data") {
+		t.Errorf("Analyze error exposed psql diagnostic content: %q", err)
+	}
+}
+
+func TestAnalyze_PropagatesPsqlFailureWithoutExposingStderr(t *testing.T) {
+	underlying := errors.New("exit status 1")
+	stderr := "ERROR: private query detail"
+	db := &database{runPsql: func(context.Context, *config.Config, psqlInvocation) (string, error) {
+		return stderr, underlying
+	}}
+
+	err := db.Analyze(context.Background(), &config.Config{DBName: config.DBName})
+	if !errors.Is(err, underlying) {
+		t.Fatalf("Analyze error = %v, want wrapped psql error", err)
+	}
+	if strings.Contains(err.Error(), stderr) || strings.Contains(err.Error(), "private query detail") {
+		t.Errorf("Analyze error exposed psql stderr: %q", err)
+	}
+}
+
+func TestAnalyze_RespectsConfiguredContextDeadline(t *testing.T) {
+	cfg := &config.Config{DBName: config.DBName, DBAnalyzeTimeout: 20 * time.Millisecond}
+	db := &database{runPsql: func(ctx context.Context, _ *config.Config, _ psqlInvocation) (string, error) {
+		<-ctx.Done()
+		return "", ctx.Err()
+	}}
+
+	err := db.Analyze(context.Background(), cfg)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Analyze error = %v, want context deadline exceeded", err)
+	}
+}
+
+func TestAnalyze_RespectsCanceledParentContext(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	called := false
+	db := &database{runPsql: func(context.Context, *config.Config, psqlInvocation) (string, error) {
+		called = true
+		return "", nil
+	}}
+
+	err := db.Analyze(ctx, &config.Config{DBName: config.DBName})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("Analyze error = %v, want context canceled", err)
+	}
+	if called {
+		t.Fatal("psql was invoked with an already-canceled context")
+	}
+}
+
+func TestAnalyze_ParentDeadlineBoundsPsqlContext(t *testing.T) {
+	parentDeadline := time.Now().Add(time.Minute)
+	ctx, cancel := context.WithDeadline(context.Background(), parentDeadline)
+	defer cancel()
+	cfg := &config.Config{DBName: config.DBName, DBAnalyzeTimeout: time.Hour}
+	var psqlDeadline time.Time
+	db := &database{runPsql: func(ctx context.Context, _ *config.Config, _ psqlInvocation) (string, error) {
+		var ok bool
+		psqlDeadline, ok = ctx.Deadline()
+		if !ok {
+			return "", errors.New("psql context has no deadline")
+		}
+		cancel()
+		<-ctx.Done()
+		return "", ctx.Err()
+	}}
+
+	err := db.Analyze(ctx, cfg)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("Analyze error = %v, want parent cancellation", err)
+	}
+	if psqlDeadline.After(parentDeadline) {
+		t.Errorf("psql deadline = %v, later than parent deadline %v", psqlDeadline, parentDeadline)
 	}
 }
 

@@ -73,6 +73,11 @@ func (d *recordingDep) Restore(_ context.Context, _ *config.Config, dump *Dump) 
 	return d.failOn["db-restore"]
 }
 
+func (d *recordingDep) Analyze(_ context.Context, _ *config.Config) error {
+	d.calls = append(d.calls, "db-analyze")
+	return d.failOn["db-analyze"]
+}
+
 func (d *recordingDep) GetReplicas(_ context.Context, _ *config.Config, workload string) (int, error) {
 	d.calls = append(d.calls, "getreplicas:"+workload)
 	if err := d.failOn["getreplicas:"+workload]; err != nil {
@@ -193,6 +198,7 @@ func TestRunnerRun_Order(t *testing.T) {
 		"db-check",
 		"db-reset",
 		"db-restore",
+		"db-analyze",
 		"scale:misskey-web:1",
 		"wait:misskey-web:1",
 		"misskey-readiness",
@@ -249,7 +255,7 @@ func TestRunnerRun_StopsOnResetFailure(t *testing.T) {
 	// back to 0 (via deferred rollback) and scale-to-1, API checks, and cleanup
 	// must never run.
 	for _, c := range dep.calls {
-		if c == "db-restore" || c == "scale:misskey-web:1" || c == "misskey-readiness" || c == "misskey-global-timeline" || c == "scale:misskey-db-v18:0" {
+		if c == "db-restore" || c == "db-analyze" || c == "scale:misskey-web:1" || c == "misskey-readiness" || c == "misskey-global-timeline" || c == "scale:misskey-db-v18:0" {
 			t.Fatalf("calls = %v, unexpected call %q after reset failure", dep.calls, c)
 		}
 	}
@@ -319,13 +325,38 @@ func TestRunnerRun_StopsOnRestoreFailure(t *testing.T) {
 	// After a restore failure the web must be rolled back to 0 (via deferred
 	// rollback) but scale-to-1, API checks, and cleanup must never run.
 	for _, c := range dep.calls {
-		if c == "scale:misskey-web:1" || c == "misskey-readiness" || c == "misskey-global-timeline" || c == "scale:misskey-db-v18:0" {
+		if c == "db-analyze" || c == "scale:misskey-web:1" || c == "misskey-readiness" || c == "misskey-global-timeline" || c == "scale:misskey-db-v18:0" {
 			t.Fatalf("calls = %v, unexpected call %q after restore failure", dep.calls, c)
 		}
 	}
 
 	// Scale transitions: web 0 (before restore), db 1 (before restore),
 	// then the deferred rollback scales web to 0 again.
+	wantReplicas := []int{0, 1, 0}
+	if len(dep.scaleReplicas) != len(wantReplicas) {
+		t.Fatalf("scaleReplicas = %v, want %v", dep.scaleReplicas, wantReplicas)
+	}
+	for i := range wantReplicas {
+		if dep.scaleReplicas[i] != wantReplicas[i] {
+			t.Fatalf("scaleReplicas[%d] = %d, want %d (full: %v)", i, dep.scaleReplicas[i], wantReplicas[i], dep.scaleReplicas)
+		}
+	}
+}
+
+func TestRunnerRun_AnalyzeFailureDoesNotStartWebAndRecoversWebOnly(t *testing.T) {
+	dep := &recordingDep{failOn: map[string]error{"db-analyze": errors.New("analyze boom")}}
+	r := newTestRunner(dep)
+
+	err := r.run(context.Background(), testConfig())
+	if err == nil {
+		t.Fatal("expected run to fail when database analyze fails")
+	}
+	if !strings.Contains(err.Error(), "db analyze") {
+		t.Fatalf("error = %v, want it to mention db analyze", err)
+	}
+	assertCallTail(t, dep.calls, []string{"db-restore", "db-analyze", "scale:misskey-web:0"})
+	assertNoCalls(t, dep.calls, "scale:misskey-web:1", "misskey-readiness", "misskey-global-timeline", "scale:misskey-db-v18:0")
+
 	wantReplicas := []int{0, 1, 0}
 	if len(dep.scaleReplicas) != len(wantReplicas) {
 		t.Fatalf("scaleReplicas = %v, want %v", dep.scaleReplicas, wantReplicas)
@@ -377,6 +408,7 @@ func TestRunnerRun_StopsOnWebStartWaitFailure(t *testing.T) {
 
 	assertCallTail(t, dep.calls, []string{
 		"db-restore",
+		"db-analyze",
 		"scale:misskey-web:1",
 		"wait:misskey-web:1",
 		"scale:misskey-web:0",
