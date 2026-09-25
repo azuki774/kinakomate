@@ -38,6 +38,9 @@ func TestRunFinalReport_Success(t *testing.T) {
 	if !strings.Contains(output.String(), `"phase":"restore","step":"wait db replicas 1"`) {
 		t.Fatalf("DB readiness wait was not logged in the restore phase: %q", output.String())
 	}
+	if !strings.Contains(output.String(), `"phase":"restore","step":"db analyze"`) {
+		t.Fatalf("database analyze step was not logged in the restore phase: %q", output.String())
+	}
 	if report.Object == nil {
 		t.Fatal("success report has no object metadata")
 	}
@@ -86,6 +89,39 @@ func TestRunFinalReport_ResetFailureRecoversWebOnly(t *testing.T) {
 			t.Fatalf("failure recovery scaled the database to zero: calls = %v", dep.calls)
 		}
 	}
+}
+
+func TestRunFinalReport_AnalyzeFailureRecoversWebOnly(t *testing.T) {
+	setRunEnv(t)
+	dep := &recordingDep{failOn: map[string]error{"db-analyze": errors.New("analyze boom")}}
+	var output bytes.Buffer
+	setRunnerFactory(t, dep)
+
+	if err := runWithLogger(context.Background(), nil, log.NewWithWriter(&output)); err == nil {
+		t.Fatal("runWithLogger succeeded, want database analyze failure")
+	}
+
+	report := decodeFinalReport(t, &output)
+	if report.Result != "failure" || report.FailedPhase != string(phaseRestore) {
+		t.Fatalf("failure report = %+v, want restore failure", report)
+	}
+	if !strings.Contains(report.Error, "db analyze") || !strings.Contains(report.Error, "analyze boom") {
+		t.Fatalf("error = %q, want analyze step failure", report.Error)
+	}
+	if got := report.Phases[phaseIndexForTest(phaseRestore)].Status; got != phaseStatusFailure {
+		t.Fatalf("restore status = %q, want failure", got)
+	}
+	if got := report.Phases[phaseIndexForTest(phaseVerify)].Status; got != phaseStatusSkipped {
+		t.Fatalf("verify status = %q, want skipped", got)
+	}
+	if report.RecoveryStatus != "success" {
+		t.Fatalf("recovery_status = %q, want success", report.RecoveryStatus)
+	}
+	if !strings.Contains(output.String(), `"phase":"restore","step":"db analyze"`) {
+		t.Fatalf("failed analyze step was not identified in logs: %q", output.String())
+	}
+	assertCallTail(t, dep.calls, []string{"db-restore", "db-analyze", "scale:misskey-web:0"})
+	assertNoCalls(t, dep.calls, "scale:misskey-web:1", "misskey-readiness", "misskey-global-timeline", "scale:misskey-db-v18:0")
 }
 
 func TestRunFinalReport_PreflightFailureSkipsWorkloads(t *testing.T) {

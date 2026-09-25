@@ -26,6 +26,8 @@ type Database interface {
 	Reset(ctx context.Context, cfg *config.Config) error
 	// Restore restores the downloaded dump into the database.
 	Restore(ctx context.Context, cfg *config.Config, dump *Dump) error
+	// Analyze updates planner statistics after the dump has been restored.
+	Analyze(ctx context.Context, cfg *config.Config) error
 }
 
 // ObjectStorage abstracts the S3 operations the runner needs.
@@ -163,6 +165,7 @@ func (r *runner) runWithResult(ctx context.Context, cfg *config.Config, result *
 		{"db restore", func(ctx context.Context, cfg *config.Config) error {
 			return r.db.Restore(ctx, cfg, dump)
 		}},
+		{"db analyze", r.db.Analyze},
 	}
 	verify := []runnerStep{
 		{"scale web to 1", func(ctx context.Context, cfg *config.Config) error {

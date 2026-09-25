@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"time"
 
 	"github.com/azuki774/kinakomate/internal/config"
 	"github.com/azuki774/kinakomate/internal/log"
@@ -137,6 +138,54 @@ func (d *database) Restore(ctx context.Context, cfg *config.Config, dump *Dump) 
 		"dump_s3_key", dump.Key,
 		"dump_etag", dump.ETag,
 		"dump_size", dump.Size,
+	)
+	return nil
+}
+
+// Analyze updates PostgreSQL planner statistics for the restored database
+// before the web workload is started. The timeout settings apply only to this
+// psql session, which exits after the command completes.
+func (d *database) Analyze(ctx context.Context, cfg *config.Config) error {
+	timeout := cfg.DBAnalyzeTimeout
+	if timeout <= 0 {
+		timeout = config.DefaultDBAnalyzeTimeout
+	}
+
+	analyzeCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	if err := analyzeCtx.Err(); err != nil {
+		return fmt.Errorf("database analyze context ended: %w", err)
+	}
+
+	lockTimeout := min(timeout, 30*time.Second)
+	script := fmt.Sprintf(
+		"SET statement_timeout = '%dms'; SET lock_timeout = '%dms';\n"+
+			"SELECT format('ANALYZE %%I.%%I;', n.nspname, c.relname)\n"+
+			"FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace\n"+
+			"WHERE c.relkind IN ('r', 'p', 'm')\n"+
+			"  AND n.nspname <> 'information_schema'\n"+
+			"  AND n.nspname !~ '^pg_'\n"+
+			"ORDER BY n.nspname, c.relname\n\\gexec",
+		timeout.Milliseconds(),
+		lockTimeout.Milliseconds(),
+	)
+	stderr, err := d.exec(analyzeCtx, cfg, psqlInvocation{
+		DBName: cfg.DBName,
+		Stdin:  strings.NewReader(script),
+	})
+	if contextErr := analyzeCtx.Err(); contextErr != nil {
+		return fmt.Errorf("database analyze context ended: %w", contextErr)
+	}
+	if err != nil {
+		return fmt.Errorf("database analyze failed: %w", err)
+	}
+	if strings.TrimSpace(stderr) != "" {
+		return fmt.Errorf("database analyze failed: psql emitted unexpected stderr diagnostics")
+	}
+
+	d.log().InfoContext(ctx, "database analyze completed",
+		"db_host", cfg.DBHost,
+		"db_name", cfg.DBName,
 	)
 	return nil
 }

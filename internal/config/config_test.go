@@ -20,16 +20,17 @@ func setEnv(t *testing.T, env map[string]string) {
 
 func validEnv() map[string]string {
 	return map[string]string{
-		"WEB_WORKLOAD":     "misskey-web",
-		"DB_WORKLOAD":      "misskey-db-v18",
-		"S3_REGION":        "us-east-1",
-		"S3_BUCKET":        "backups",
-		"S3_KEY":           "misskey/daily/dump.sql.gz",
-		"MISSKEY_BASE_URL": "https://misskey.example",
-		"DB_HOST":          "db",
-		"DB_PORT":          "5432",
-		"DB_USER":          "misskey",
-		"DB_PASS":          "secret",
+		"WEB_WORKLOAD":               "misskey-web",
+		"DB_WORKLOAD":                "misskey-db-v18",
+		"S3_REGION":                  "us-east-1",
+		"S3_BUCKET":                  "backups",
+		"S3_KEY":                     "misskey/daily/dump.sql.gz",
+		"MISSKEY_BASE_URL":           "https://misskey.example",
+		"DB_HOST":                    "db",
+		"DB_PORT":                    "5432",
+		"DB_USER":                    "misskey",
+		"DB_PASS":                    "secret",
+		"DB_ANALYZE_TIMEOUT_SECONDS": "",
 	}
 }
 
@@ -225,6 +226,23 @@ func TestLoadFromEnv_Success(t *testing.T) {
 	if cfg.GTLRetryTimeout != DefaultGTLRetryTimeout {
 		t.Errorf("GTLRetryTimeout = %v, want %v", cfg.GTLRetryTimeout, DefaultGTLRetryTimeout)
 	}
+	if cfg.DBAnalyzeTimeout != DefaultDBAnalyzeTimeout {
+		t.Errorf("DBAnalyzeTimeout = %v, want %v", cfg.DBAnalyzeTimeout, DefaultDBAnalyzeTimeout)
+	}
+}
+
+func TestLoadFromEnv_DBAnalyzeTimeoutCanBeOverridden(t *testing.T) {
+	env := validEnv()
+	env["DB_ANALYZE_TIMEOUT_SECONDS"] = "1234"
+	setEnv(t, env)
+
+	cfg, err := LoadFromEnv()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.DBAnalyzeTimeout != 1234*time.Second {
+		t.Fatalf("DBAnalyzeTimeout = %v, want %v", cfg.DBAnalyzeTimeout, 1234*time.Second)
+	}
 }
 
 func TestLoadFromEnv_GTLSettingsCanBeOverridden(t *testing.T) {
@@ -243,7 +261,7 @@ func TestLoadFromEnv_GTLSettingsCanBeOverridden(t *testing.T) {
 	}
 }
 
-func TestLoadFromEnv_InvalidGTLSettings(t *testing.T) {
+func TestLoadFromEnv_InvalidTimeoutAndRetrySettings(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
 		env   string
@@ -254,6 +272,11 @@ func TestLoadFromEnv_InvalidGTLSettings(t *testing.T) {
 		{name: "retry timeout decimal", env: "MISSKEY_GTL_RETRY_TIMEOUT_SECONDS", value: "1.5"},
 		{name: "retry timeout duration overflow", env: "MISSKEY_GTL_RETRY_TIMEOUT_SECONDS", value: "9223372037"},
 		{name: "request timeout overflow", env: "MISSKEY_GTL_REQUEST_TIMEOUT_SECONDS", value: "9223372036854775808"},
+		{name: "analyze timeout zero", env: "DB_ANALYZE_TIMEOUT_SECONDS", value: "0"},
+		{name: "analyze timeout negative", env: "DB_ANALYZE_TIMEOUT_SECONDS", value: "-1"},
+		{name: "analyze timeout decimal", env: "DB_ANALYZE_TIMEOUT_SECONDS", value: "1.5"},
+		{name: "analyze timeout duration overflow", env: "DB_ANALYZE_TIMEOUT_SECONDS", value: "9223372037"},
+		{name: "analyze timeout PostgreSQL overflow", env: "DB_ANALYZE_TIMEOUT_SECONDS", value: "2147484"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			env := validEnv()
@@ -290,6 +313,9 @@ func TestConfig_Loggable_OmitsPassword(t *testing.T) {
 	}
 	if loggable["misskey_base_url"] != "https://misskey.example/" {
 		t.Error("Loggable should include misskey_base_url")
+	}
+	if loggable["db_analyze_timeout_seconds"] != int64(cfg.DBAnalyzeTimeout/time.Second) {
+		t.Error("Loggable should include the database analyze timeout")
 	}
 	if _, ok := loggable["gtl_request_timeout_seconds"]; !ok {
 		t.Error("Loggable should include GTL settings")
