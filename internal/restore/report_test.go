@@ -120,7 +120,7 @@ func TestRunFinalReport_AnalyzeFailureRecoversWebOnly(t *testing.T) {
 	if !strings.Contains(output.String(), `"phase":"restore","step":"db analyze"`) {
 		t.Fatalf("failed analyze step was not identified in logs: %q", output.String())
 	}
-	assertCallTail(t, dep.calls, []string{"db-restore", "db-analyze", "scale:misskey-web:0"})
+	assertCallTail(t, dep.calls, []string{"db-restore", "db-size", "db-analyze", "scale:misskey-web:0"})
 	assertNoCalls(t, dep.calls, "scale:misskey-web:1", "misskey-readiness", "misskey-global-timeline", "scale:misskey-db-v18:0")
 }
 

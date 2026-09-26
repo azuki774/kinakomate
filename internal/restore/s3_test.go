@@ -20,13 +20,14 @@ import (
 // fakeS3 simulates the S3 API. The body returned by GetObject is the exact
 // bytes supplied by the test.
 type fakeS3 struct {
-	body    []byte
-	etag    string
-	size    int64
-	getErr  error
-	headErr error
-	gotGet  bool
-	gotHead bool
+	body             []byte
+	etag             string
+	size             int64
+	nilContentLength bool
+	getErr           error
+	headErr          error
+	gotGet           bool
+	gotHead          bool
 }
 
 func (f *fakeS3) HeadObject(_ context.Context, _ *s3.HeadObjectInput, _ ...func(*s3.Options)) (*s3.HeadObjectOutput, error) {
@@ -45,11 +46,15 @@ func (f *fakeS3) GetObject(_ context.Context, _ *s3.GetObjectInput, _ ...func(*s
 	if f.getErr != nil {
 		return nil, f.getErr
 	}
-	return &s3.GetObjectOutput{
+	out := &s3.GetObjectOutput{
 		Body:          io.NopCloser(bytes.NewReader(f.body)),
 		ETag:          aws.String(f.etag),
 		ContentLength: aws.Int64(f.size),
-	}, nil
+	}
+	if f.nilContentLength {
+		out.ContentLength = nil
+	}
+	return out, nil
 }
 
 func testCfg() *config.Config {
@@ -137,6 +142,19 @@ func TestDownloadAndExtract_StagesGzip(t *testing.T) {
 	}
 	if !bytes.Equal(data, fake.body) {
 		t.Errorf("staged file does not match gzip body")
+	}
+}
+
+func TestDownloadAndExtract_UsesTransferredBytesWhenContentLengthMissing(t *testing.T) {
+	sql := []byte("SELECT 1;")
+	fake := &fakeS3{body: gzipBytes(t, sql), etag: "e", nilContentLength: true}
+	dump, err := newObjectStorageWithClient(fake, log.NewWithWriter(io.Discard)).DownloadAndExtract(context.Background(), testCfg())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(dump.Cleanup)
+	if dump.Size != int64(len(fake.body)) {
+		t.Fatalf("Size = %d, want transferred gzip size %d", dump.Size, len(fake.body))
 	}
 }
 

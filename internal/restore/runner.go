@@ -28,6 +28,8 @@ type Database interface {
 	Restore(ctx context.Context, cfg *config.Config, dump *Dump) error
 	// Analyze updates planner statistics after the dump has been restored.
 	Analyze(ctx context.Context, cfg *config.Config) error
+	// Size reports the restored database size in bytes.
+	Size(ctx context.Context, cfg *config.Config) (int64, error)
 }
 
 // ObjectStorage abstracts the S3 operations the runner needs.
@@ -113,10 +115,14 @@ func (r *runner) runWithResult(ctx context.Context, cfg *config.Config, result *
 		if dump == nil {
 			return
 		}
+		cleanupStarted := time.Now()
 		cleanupErr := dump.cleanup()
+		result.tempCleanupDuration = elapsed(cleanupStarted, time.Now())
+		result.tempCleanupStatus = "success"
 		if cleanupErr == nil {
 			return
 		}
+		result.tempCleanupStatus = "error"
 		cleanupFailure := fmt.Errorf("staged dump cleanup failed: %w", cleanupErr)
 		attrs := []any{"phase", phaseCleanup, "err", cleanupErr}
 		if err != nil || result.failedPhase != "" {
@@ -163,7 +169,17 @@ func (r *runner) runWithResult(ctx context.Context, cfg *config.Config, result *
 		{"db connection check", r.db.CheckConnection},
 		{"reset database", r.db.Reset},
 		{"db restore", func(ctx context.Context, cfg *config.Config) error {
-			return r.db.Restore(ctx, cfg, dump)
+			if err := r.db.Restore(ctx, cfg, dump); err != nil {
+				return err
+			}
+			result.databaseSizeAttempted = true
+			n, err := r.db.Size(ctx, cfg)
+			if err != nil {
+				r.log().WarnContext(ctx, "database size unavailable", "err", err)
+			} else {
+				result.databaseSize, result.databaseSizeAvailable = n, true
+			}
+			return nil
 		}},
 		{"db analyze", r.db.Analyze},
 	}
@@ -233,6 +249,12 @@ func (r *runner) recover(ctx context.Context, cfg *config.Config, result *execut
 		return
 	}
 	logger := r.log()
+	startedRecovery := time.Now()
+	result.recoveryStatus = "error"
+	defer func() {
+		result.recoveryDuration = elapsed(startedRecovery, time.Now())
+		result.recoveryPhaseStatus = result.recoveryStatus
+	}()
 	rbCtx := context.WithoutCancel(ctx)
 	if err := result.beginPhase(phaseCleanup, time.Now()); err != nil {
 		logger.ErrorContext(rbCtx, "rollback: failed to scale web to 0", "phase", phaseCleanup, "step", "scale web to 0", "recovery_status", "error", "err", err)

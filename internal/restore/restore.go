@@ -20,10 +20,22 @@ import (
 // waits for the Misskey API, validates the global timeline, and cleans up the
 // workloads.
 func Run(ctx context.Context, args []string) error {
-	return runWithLogger(ctx, args, log.New())
+	_, err := RunWithSummary(ctx, args)
+	return err
+}
+
+// RunWithSummary returns safe metrics after the workflow and all cleanup finish.
+// Metrics collected before a failure remain available alongside the error.
+func RunWithSummary(ctx context.Context, args []string) (RunSummary, error) {
+	return runWithSummaryLogger(ctx, args, log.New())
 }
 
 func runWithLogger(ctx context.Context, args []string, logger *slog.Logger) (err error) {
+	_, err = runWithSummaryLogger(ctx, args, logger)
+	return err
+}
+
+func runWithSummaryLogger(ctx context.Context, args []string, logger *slog.Logger) (summary RunSummary, err error) {
 	if logger == nil {
 		logger = log.New()
 	}
@@ -32,12 +44,26 @@ func runWithLogger(ctx context.Context, args []string, logger *slog.Logger) (err
 		if err != nil && result.firstErr == nil && result.currentPhase != "" {
 			_ = result.failPhase(result.currentPhase, time.Now(), err)
 		}
-		report := result.report(time.Now())
+		finished := time.Now()
+		report := result.report(finished)
+		summary = result.safeSummary(finished)
 		attrs := []any{
 			"result", report.Result,
 			"total_duration_ms", report.TotalDurationMS,
 			"total_duration", report.TotalDuration,
 			"phases", report.Phases,
+			"database_size_attempted", summary.DatabaseSizeAttempted,
+			"database_size_available", summary.DatabaseSizeAvailable,
+			"recovery_attempted", summary.RecoveryAttempted,
+			"recovery_phase_status", summary.RecoveryStatus,
+			"recovery_duration_ms", durationMilliseconds(summary.RecoveryDuration),
+			"recovery_duration", summary.RecoveryDuration.String(),
+			"temp_cleanup_status", summary.TempCleanupStatus,
+			"temp_cleanup_duration_ms", durationMilliseconds(summary.TempCleanupDuration),
+			"temp_cleanup_duration", summary.TempCleanupDuration.String(),
+		}
+		if summary.DatabaseSizeAvailable {
+			attrs = append(attrs, "database_size_bytes", summary.DatabaseSize)
 		}
 		if report.FailedPhase != "" {
 			attrs = append(attrs, "failed_phase", report.FailedPhase)
@@ -58,14 +84,14 @@ func runWithLogger(ctx context.Context, args []string, logger *slog.Logger) (err
 	}()
 
 	if err = result.beginPhase(phasePreflight, time.Now()); err != nil {
-		return err
+		return summary, err
 	}
 	fs := flag.NewFlagSet("restore-test", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	if err = fs.Parse(args); err != nil {
 		err = fmt.Errorf("parse restore-test flags: %w", err)
 		_ = result.failPhase(phasePreflight, time.Now(), err)
-		return err
+		return summary, err
 	}
 
 	var cfg *config.Config
@@ -73,7 +99,7 @@ func runWithLogger(ctx context.Context, args []string, logger *slog.Logger) (err
 	if err != nil {
 		err = fmt.Errorf("pre-flight validation failed: %w", err)
 		_ = result.failPhase(phasePreflight, time.Now(), err)
-		return err
+		return summary, err
 	}
 
 	logger.InfoContext(ctx, "pre-flight validation passed", configToArgs(cfg.Loggable())...)
@@ -83,13 +109,14 @@ func runWithLogger(ctx context.Context, args []string, logger *slog.Logger) (err
 	if err != nil {
 		err = fmt.Errorf("initialize runner: %w", err)
 		_ = result.failPhase(phasePreflight, time.Now(), err)
-		return err
+		return summary, err
 	}
 	result.markInitialized()
 	if err = result.completePhase(time.Now()); err != nil {
-		return err
+		return summary, err
 	}
-	return r.runWithResult(ctx, cfg, result)
+	err = r.runWithResult(ctx, cfg, result)
+	return summary, err
 }
 
 // runnerFactory builds a runner with the real dependencies. It is a variable so

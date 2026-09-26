@@ -7,6 +7,10 @@ import (
 	"errors"
 	"flag"
 	"testing"
+	"time"
+
+	"github.com/azuki774/kinakomate/internal/notification"
+	"github.com/azuki774/kinakomate/internal/restore"
 )
 
 func TestRun_CommandErrors(t *testing.T) {
@@ -45,15 +49,20 @@ func TestRunRestoreTestNotifiesSuccessAndFailure(t *testing.T) {
 				sendRestoreNotification = oldNotify
 			})
 
-			runRestoreTest = func(context.Context, []string) error { return tc.restoreErr }
+			runRestoreTest = func(context.Context, []string) (restore.RunSummary, error) {
+				return restore.RunSummary{DatabaseSize: 1234, DatabaseSizeAvailable: true, BackupSize: 567, BackupSizeAvailable: true, Total: time.Minute, Phases: []restore.PhaseSummary{{Name: "restore", Status: "success", Duration: time.Second}}}, tc.restoreErr
+			}
 			var gotURL string
 			var gotSuccess bool
-			sendRestoreNotification = func(ctx context.Context, webhookURL string, success bool) error {
+			sendRestoreNotification = func(ctx context.Context, webhookURL string, result notification.RestoreResult) error {
 				if ctx.Err() != nil {
 					t.Errorf("notification context is canceled: %v", ctx.Err())
 				}
 				gotURL = webhookURL
-				gotSuccess = success
+				gotSuccess = result.Success
+				if result.DatabaseSize != 1234 || !result.DatabaseSizeAvailable || result.BackupSize != 567 || !result.BackupSizeAvailable || result.Total != time.Minute || len(result.Phases) != 1 || result.Phases[0].Duration != time.Second {
+					t.Errorf("metrics not forwarded: %+v", result)
+				}
 				return nil
 			}
 
@@ -105,17 +114,17 @@ func TestRunRestoreTestSkipsMissingWebhookAndHelp(t *testing.T) {
 	})
 
 	notifications := 0
-	sendRestoreNotification = func(context.Context, string, bool) error {
+	sendRestoreNotification = func(context.Context, string, notification.RestoreResult) error {
 		notifications++
 		return nil
 	}
-	runRestoreTest = func(context.Context, []string) error { return nil }
+	runRestoreTest = func(context.Context, []string) (restore.RunSummary, error) { return restore.RunSummary{}, nil }
 	if err := run(context.Background(), []string{"restore-test"}); err != nil {
 		t.Fatalf("run returned error: %v", err)
 	}
 
 	t.Setenv(discordNotificationWebhookEnv, "https://discord.example/webhook")
-	runRestoreTest = func(context.Context, []string) error { return flag.ErrHelp }
+	runRestoreTest = func(context.Context, []string) (restore.RunSummary, error) { return restore.RunSummary{}, flag.ErrHelp }
 	if err := run(context.Background(), []string{"restore-test", "--help"}); !errors.Is(err, flag.ErrHelp) {
 		t.Fatalf("run error = %v, want flag.ErrHelp", err)
 	}
@@ -130,7 +139,7 @@ func TestRunUnknownCommandDoesNotNotify(t *testing.T) {
 	t.Cleanup(func() { sendRestoreNotification = oldNotify })
 
 	notifications := 0
-	sendRestoreNotification = func(context.Context, string, bool) error {
+	sendRestoreNotification = func(context.Context, string, notification.RestoreResult) error {
 		notifications++
 		return nil
 	}
@@ -152,8 +161,8 @@ func TestRunNotificationFailurePreservesRestoreError(t *testing.T) {
 	})
 
 	restoreErr := errors.New("restore details")
-	runRestoreTest = func(context.Context, []string) error { return restoreErr }
-	sendRestoreNotification = func(context.Context, string, bool) error {
+	runRestoreTest = func(context.Context, []string) (restore.RunSummary, error) { return restore.RunSummary{}, restoreErr }
+	sendRestoreNotification = func(context.Context, string, notification.RestoreResult) error {
 		return errors.New("webhook transport details")
 	}
 	if err := run(context.Background(), []string{"restore-test"}); !errors.Is(err, restoreErr) {
@@ -171,11 +180,11 @@ func TestRunNotificationUsesFreshContextAfterRestoreCancellation(t *testing.T) {
 	})
 
 	var restoreCanceled, notificationCanceled bool
-	runRestoreTest = func(ctx context.Context, _ []string) error {
+	runRestoreTest = func(ctx context.Context, _ []string) (restore.RunSummary, error) {
 		restoreCanceled = errors.Is(ctx.Err(), context.Canceled)
-		return context.Canceled
+		return restore.RunSummary{}, context.Canceled
 	}
-	sendRestoreNotification = func(ctx context.Context, _ string, _ bool) error {
+	sendRestoreNotification = func(ctx context.Context, _ string, _ notification.RestoreResult) error {
 		notificationCanceled = ctx.Err() != nil
 		return nil
 	}
@@ -190,5 +199,51 @@ func TestRunNotificationUsesFreshContextAfterRestoreCancellation(t *testing.T) {
 	}
 	if notificationCanceled {
 		t.Fatal("notification received canceled context")
+	}
+}
+
+func TestRunForwardsPartialMetricsAndCleanupOutcomes(t *testing.T) {
+	t.Setenv(discordNotificationWebhookEnv, "https://discord.example/webhook")
+	oldRun, oldNotify := runRestoreTest, sendRestoreNotification
+	t.Cleanup(func() { runRestoreTest, sendRestoreNotification = oldRun, oldNotify })
+	errRestore := errors.New("private database detail")
+	runRestoreTest = func(context.Context, []string) (restore.RunSummary, error) {
+		return restore.RunSummary{
+			FailedPhase: "verify", DatabaseSizeAttempted: true,
+			RecoveryAttempted: true, RecoveryStatus: "success", RecoveryDuration: 2 * time.Second,
+			TempCleanupStatus: "error", TempCleanupDuration: time.Second,
+		}, errRestore
+	}
+	called := false
+	sendRestoreNotification = func(_ context.Context, _ string, result notification.RestoreResult) error {
+		called = true
+		if result.Success || result.FailedPhase != "verify" || !result.DatabaseSizeAttempted || result.DatabaseSizeAvailable {
+			t.Errorf("incorrect partial result: %+v", result)
+		}
+		if result.Recovery == nil || result.Recovery.Status != "success" || result.Recovery.Duration != 2*time.Second {
+			t.Errorf("recovery not mapped: %+v", result.Recovery)
+		}
+		if result.TempCleanup == nil || result.TempCleanup.Status != "failure" || result.TempCleanup.Duration != time.Second {
+			t.Errorf("temp cleanup not mapped: %+v", result.TempCleanup)
+		}
+		return nil
+	}
+	if err := run(context.Background(), []string{"restore-test"}); !errors.Is(err, errRestore) || !called {
+		t.Fatalf("run err=%v called=%t", err, called)
+	}
+}
+
+func TestNotificationFailureDoesNotFailSuccessfulRestore(t *testing.T) {
+	t.Setenv(discordNotificationWebhookEnv, "https://discord.example/webhook")
+	oldRun, oldNotify := runRestoreTest, sendRestoreNotification
+	t.Cleanup(func() { runRestoreTest, sendRestoreNotification = oldRun, oldNotify })
+	runRestoreTest = func(context.Context, []string) (restore.RunSummary, error) {
+		return restore.RunSummary{Success: true}, nil
+	}
+	sendRestoreNotification = func(context.Context, string, notification.RestoreResult) error {
+		return errors.New("notification failed")
+	}
+	if err := run(context.Background(), []string{"restore-test"}); err != nil {
+		t.Fatal(err)
 	}
 }

@@ -73,6 +73,75 @@ func TestNewDatabaseRetainsLogger(t *testing.T) {
 	}
 }
 
+func TestDatabaseSizeParsesNumericStdout(t *testing.T) {
+	cfg := &config.Config{DBName: config.DBName}
+	var got psqlInvocation
+	db := &database{runPsql: func(_ context.Context, _ *config.Config, inv psqlInvocation) (string, error) {
+		got = inv
+		_, _ = io.WriteString(inv.Stdout, " 12345\n")
+		return "", nil
+	}}
+	size, err := db.Size(context.Background(), cfg)
+	if err != nil || size != 12345 {
+		t.Fatalf("Size() = %d, %v", size, err)
+	}
+	if got.Command != "SELECT pg_database_size(current_database());" || got.DBName != config.DBName {
+		t.Fatalf("unexpected invocation: %+v", got)
+	}
+	args := buildPsqlCmd(context.Background(), cfg, got).Args
+	if !hasFlag(args, "--tuples-only") || !hasFlag(args, "--no-align") {
+		t.Fatalf("size query args = %v, want tuples-only and no-align", args)
+	}
+}
+
+func TestDatabaseSizeRejectsInvalidOutputOrQueryFailure(t *testing.T) {
+	for _, tc := range []struct {
+		name, stdout string
+		runErr       error
+	}{
+		{name: "invalid", stdout: "123 bytes"},
+		{name: "empty", stdout: ""},
+		{name: "multiline", stdout: "12\n13"},
+		{name: "overflow", stdout: "9223372036854775808"},
+		{name: "negative", stdout: "-1"},
+		{name: "failed", stdout: "10", runErr: errors.New("failed")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			db := &database{runPsql: func(_ context.Context, _ *config.Config, inv psqlInvocation) (string, error) {
+				_, _ = io.WriteString(inv.Stdout, tc.stdout)
+				return "", tc.runErr
+			}}
+			if _, err := db.Size(context.Background(), &config.Config{DBName: config.DBName}); err == nil {
+				t.Fatal("expected size query error")
+			}
+		})
+	}
+}
+
+func TestDatabaseSizeUsesDeadlineAndInheritsCancellation(t *testing.T) {
+	cfg := &config.Config{DBName: config.DBName}
+	var got context.Context
+	db := &database{runPsql: func(ctx context.Context, _ *config.Config, inv psqlInvocation) (string, error) {
+		got = ctx
+		if err := ctx.Err(); err != nil {
+			return "", err
+		}
+		_, _ = io.WriteString(inv.Stdout, "1")
+		return "", nil
+	}}
+	if _, err := db.Size(context.Background(), cfg); err != nil {
+		t.Fatal(err)
+	}
+	if deadline, ok := got.Deadline(); !ok || time.Until(deadline) > 10*time.Second || time.Until(deadline) <= 0 {
+		t.Fatalf("size context deadline = %v, present=%t; want within 10 seconds", deadline, ok)
+	}
+	parent, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := db.Size(parent, cfg); !errors.Is(err, context.Canceled) {
+		t.Fatalf("Size error = %v, want inherited context cancellation", err)
+	}
+}
+
 func TestRestore_StreamsDecompressedSQLToPsql(t *testing.T) {
 	sql := "CREATE TABLE t(id int);\nINSERT INTO t VALUES (1);\n"
 	dumpPath := writeGzip(t, t.TempDir(), sql)
@@ -94,6 +163,9 @@ func TestRestore_StreamsDecompressedSQLToPsql(t *testing.T) {
 	}
 	if !inv.SingleTransaction {
 		t.Error("restore must run in a single transaction")
+	}
+	if hasFlag(buildPsqlCmd(context.Background(), cfg, inv).Args, "--tuples-only") || hasFlag(buildPsqlCmd(context.Background(), cfg, inv).Args, "--no-align") {
+		t.Fatal("restore invocation must not use size-query output flags")
 	}
 	if inv.Stdin == nil {
 		t.Fatal("expected restore to stream SQL via stdin")

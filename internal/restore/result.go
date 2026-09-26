@@ -64,18 +64,49 @@ type phaseSummary struct {
 }
 
 type executionResult struct {
-	startAt           time.Time
-	currentPhase      phaseName
-	currentPhaseStart time.Time
-	nextPhase         int
-	initialized       bool
-	failedPhase       phaseName
-	firstErr          error
-	recoveryErr       error
-	recoveryStatus    string
-	recoveryAttempted bool
-	phases            map[phaseName]phaseSummary
-	object            *objectReport
+	startAt               time.Time
+	currentPhase          phaseName
+	currentPhaseStart     time.Time
+	nextPhase             int
+	initialized           bool
+	failedPhase           phaseName
+	firstErr              error
+	recoveryErr           error
+	recoveryStatus        string
+	recoveryAttempted     bool
+	phases                map[phaseName]phaseSummary
+	object                *objectReport
+	databaseSize          int64
+	databaseSizeAvailable bool
+	databaseSizeAttempted bool
+	recoveryPhaseStatus   string
+	recoveryDuration      time.Duration
+	tempCleanupDuration   time.Duration
+	tempCleanupStatus     string
+}
+
+// RunSummary contains only operational metrics safe to pass to notifications.
+type RunSummary struct {
+	Success               bool
+	FailedPhase           string
+	DatabaseSize          int64
+	DatabaseSizeAvailable bool
+	DatabaseSizeAttempted bool
+	BackupSize            int64
+	BackupSizeAvailable   bool
+	Total                 time.Duration
+	Phases                []PhaseSummary
+	RecoveryStatus        string
+	RecoveryAttempted     bool
+	RecoveryDuration      time.Duration
+	TempCleanupStatus     string
+	TempCleanupDuration   time.Duration
+}
+
+type PhaseSummary struct {
+	Name     string
+	Status   string
+	Duration time.Duration
 }
 
 func newExecutionResult(start time.Time) *executionResult {
@@ -232,6 +263,39 @@ func (r *executionResult) report(at time.Time) finalReport {
 		})
 	}
 	return report
+}
+
+func (r *executionResult) safeSummary(at time.Time) RunSummary {
+	s := RunSummary{
+		Success:               r.failedPhase == "" && r.currentPhase == "" && r.nextPhase == len(phaseOrder),
+		FailedPhase:           string(r.failedPhase),
+		Total:                 elapsed(r.startAt, at),
+		DatabaseSize:          r.databaseSize,
+		DatabaseSizeAvailable: r.databaseSizeAvailable,
+		DatabaseSizeAttempted: r.databaseSizeAttempted,
+		RecoveryStatus:        r.recoveryStatus,
+		RecoveryAttempted:     r.recoveryAttempted,
+		RecoveryDuration:      r.recoveryDuration,
+		TempCleanupStatus:     r.tempCleanupStatus,
+		TempCleanupDuration:   r.tempCleanupDuration,
+	}
+	// Temporary file deletion can change the legacy aggregate recovery status.
+	// Keep the actual recovery operation's outcome separate for notifications.
+	if r.recoveryPhaseStatus != "" {
+		s.RecoveryStatus = r.recoveryPhaseStatus
+	}
+	if r.object != nil {
+		s.BackupSize, s.BackupSizeAvailable = r.object.Size, true
+	}
+	for _, p := range phaseOrder {
+		v, ok := r.phases[p]
+		status := string(v.status)
+		if !ok {
+			status = "skipped"
+		}
+		s.Phases = append(s.Phases, PhaseSummary{Name: string(p), Status: status, Duration: v.duration})
+	}
+	return s
 }
 
 func phaseIndex(phase phaseName) int {

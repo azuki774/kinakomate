@@ -19,7 +19,7 @@ const discordNotificationWebhookEnv = "DISCORD_NOTIFICATION_WEBHOOK"
 // These variables keep the command boundary deterministic in tests without
 // changing restore.Run's dependency graph.
 var (
-	runRestoreTest          = restore.Run
+	runRestoreTest          = restore.RunWithSummary
 	sendRestoreNotification = notification.SendRestoreResult
 )
 
@@ -41,9 +41,9 @@ func run(ctx context.Context, args []string) error {
 
 	switch args[0] {
 	case "restore-test":
-		err := runRestoreTest(ctx, args[1:])
+		summary, err := runRestoreTest(ctx, args[1:])
 		if !errors.Is(err, flag.ErrHelp) {
-			notifyRestoreTest(err)
+			notifyRestoreTest(summary, err)
 		}
 		return err
 	case "help", "--help", "-h":
@@ -56,7 +56,7 @@ func run(ctx context.Context, args []string) error {
 	}
 }
 
-func notifyRestoreTest(restoreErr error) {
+func notifyRestoreTest(summary restore.RunSummary, restoreErr error) {
 	webhookURL := strings.TrimSpace(os.Getenv(discordNotificationWebhookEnv))
 	if webhookURL == "" {
 		return
@@ -64,8 +64,34 @@ func notifyRestoreTest(restoreErr error) {
 
 	// Do not reuse the restore context: a canceled restore must still report
 	// its failure. SendRestoreResult adds the bounded request timeout.
-	if err := sendRestoreNotification(context.Background(), webhookURL, restoreErr == nil); err != nil {
+	result := notification.RestoreResult{
+		Success:               restoreErr == nil,
+		FailedPhase:           summary.FailedPhase,
+		DatabaseSize:          summary.DatabaseSize,
+		DatabaseSizeAvailable: summary.DatabaseSizeAvailable,
+		DatabaseSizeAttempted: summary.DatabaseSizeAttempted,
+		BackupSize:            summary.BackupSize,
+		BackupSizeAvailable:   summary.BackupSizeAvailable,
+		Total:                 summary.Total,
+	}
+	if summary.RecoveryAttempted {
+		result.Recovery = &notification.Phase{Status: notificationStatus(summary.RecoveryStatus), Duration: summary.RecoveryDuration}
+	}
+	if summary.TempCleanupStatus != "" {
+		result.TempCleanup = &notification.Phase{Status: notificationStatus(summary.TempCleanupStatus), Duration: summary.TempCleanupDuration}
+	}
+	for _, p := range summary.Phases {
+		result.Phases = append(result.Phases, notification.Phase{Name: p.Name, Status: p.Status, Duration: p.Duration})
+	}
+	if err := sendRestoreNotification(context.Background(), webhookURL, result); err != nil {
 		// Keep both the restore error and webhook URL out of notification logs.
 		log.New().Warn("discord notification failed")
 	}
+}
+
+func notificationStatus(status string) string {
+	if status == "error" {
+		return "failure"
+	}
+	return status
 }

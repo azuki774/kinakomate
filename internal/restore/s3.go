@@ -132,7 +132,8 @@ func (o *objectStorage) DownloadAndExtract(ctx context.Context, cfg *config.Conf
 		return nil, fmt.Errorf("chmod temp dump file: %w", err)
 	}
 
-	if _, err := io.Copy(tmp, out.Body); err != nil {
+	transferred, err := io.Copy(tmp, out.Body)
+	if err != nil {
 		os.Remove(tmpPath) //nolint:errcheck
 		return nil, fmt.Errorf("stream S3 object to temp file: %w", err)
 	}
@@ -154,12 +155,16 @@ func (o *objectStorage) DownloadAndExtract(ctx context.Context, cfg *config.Conf
 		"s3_stored_size", tmpStatSize(tmpPath),
 	)
 
+	size := transferred
+	if out.ContentLength != nil && *out.ContentLength >= 0 {
+		size = *out.ContentLength
+	}
 	return &Dump{
 		Path:   tmpPath,
 		Bucket: cfg.S3Bucket,
 		Key:    cfg.S3Key,
 		ETag:   aws.ToString(out.ETag),
-		Size:   aws.ToInt64(out.ContentLength),
+		Size:   size,
 	}, nil
 }
 
