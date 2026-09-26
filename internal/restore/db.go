@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"time"
 
@@ -31,6 +32,7 @@ type psqlInvocation struct {
 	Command           string
 	Stdin             io.Reader
 	SingleTransaction bool
+	Stdout            io.Writer
 }
 
 // database restores the staged gzip dump into PostgreSQL using psql. The
@@ -72,6 +74,23 @@ func (d *database) CheckConnection(ctx context.Context, cfg *config.Config) erro
 		return fmt.Errorf("database connection check failed: %w: %s", err, strings.TrimSpace(stderr))
 	}
 	return nil
+}
+
+// Size returns the restored database size in bytes. Query output is captured
+// separately from restore output and strictly parsed as one nonnegative integer.
+func (d *database) Size(ctx context.Context, cfg *config.Config) (int64, error) {
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	var stdout bytes.Buffer
+	stderr, err := d.exec(ctx, cfg, psqlInvocation{DBName: cfg.DBName, Command: "SELECT pg_database_size(current_database());", Stdout: &stdout})
+	if err != nil {
+		return 0, fmt.Errorf("database size query failed: %w: %s", err, strings.TrimSpace(stderr))
+	}
+	size, err := strconv.ParseInt(strings.TrimSpace(stdout.String()), 10, 64)
+	if err != nil || size < 0 {
+		return 0, fmt.Errorf("database size query returned invalid output")
+	}
+	return size, nil
 }
 
 // Reset recreates the target database from template0 so the restore always
@@ -203,9 +222,11 @@ func (d *database) exec(ctx context.Context, cfg *config.Config, inv psqlInvocat
 // psqlRun is the default psql command runner.
 func psqlRun(ctx context.Context, cfg *config.Config, inv psqlInvocation) (string, error) {
 	cmd := buildPsqlCmd(ctx, cfg, inv)
-
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
+	if inv.Stdout != nil {
+		cmd.Stdout = inv.Stdout
+	}
 	if err := cmd.Run(); err != nil {
 		return stderr.String(), err
 	}
@@ -232,6 +253,9 @@ func buildPsqlCmd(ctx context.Context, cfg *config.Config, inv psqlInvocation) *
 	}
 	if inv.SingleTransaction {
 		args = append(args, "--single-transaction")
+	}
+	if inv.Stdout != nil {
+		args = append(args, "--tuples-only", "--no-align")
 	}
 
 	cmd := exec.CommandContext(ctx, "psql", args...)

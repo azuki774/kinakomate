@@ -205,3 +205,18 @@ func TestExecutionResult_CopiesOnlyDumpMetadata(t *testing.T) {
 		t.Fatalf("report leaked dump path: %s", data)
 	}
 }
+
+func TestSafeSummaryDistinguishesUnattemptedDatabaseSizeAndReportsRecoveryCleanup(t *testing.T) {
+	result := newExecutionResult(time.Unix(0, 0))
+	result.recoveryStatus = "error"
+	result.recoveryDuration = 2 * time.Second
+	result.tempCleanupStatus = "success"
+	result.tempCleanupDuration = time.Second
+	summary := result.safeSummary(time.Unix(3, 0))
+	if summary.DatabaseSizeAttempted || summary.DatabaseSizeAvailable {
+		t.Fatalf("database size state = attempted %t available %t", summary.DatabaseSizeAttempted, summary.DatabaseSizeAvailable)
+	}
+	if summary.RecoveryStatus != "error" || summary.RecoveryDuration != 2*time.Second || summary.TempCleanupStatus != "success" || summary.TempCleanupDuration != time.Second {
+		t.Fatalf("summary metrics = %+v", summary)
+	}
+}

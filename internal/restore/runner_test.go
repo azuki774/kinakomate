@@ -26,6 +26,8 @@ type recordingDep struct {
 	lastDump      *Dump
 	dumpPath      string
 	dumpCleanup   func() error
+	dbSize        int64
+	dbSizeErr     error
 }
 
 func (d *recordingDep) CheckConnection(_ context.Context, _ *config.Config) error {
@@ -76,6 +78,17 @@ func (d *recordingDep) Restore(_ context.Context, _ *config.Config, dump *Dump) 
 func (d *recordingDep) Analyze(_ context.Context, _ *config.Config) error {
 	d.calls = append(d.calls, "db-analyze")
 	return d.failOn["db-analyze"]
+}
+
+func (d *recordingDep) Size(_ context.Context, _ *config.Config) (int64, error) {
+	d.calls = append(d.calls, "db-size")
+	if err := d.failOn["db-size"]; err != nil {
+		return 0, err
+	}
+	if d.dbSizeErr != nil {
+		return 0, d.dbSizeErr
+	}
+	return d.dbSize, nil
 }
 
 func (d *recordingDep) GetReplicas(_ context.Context, _ *config.Config, workload string) (int, error) {
@@ -198,6 +211,7 @@ func TestRunnerRun_Order(t *testing.T) {
 		"db-check",
 		"db-reset",
 		"db-restore",
+		"db-size",
 		"db-analyze",
 		"scale:misskey-web:1",
 		"wait:misskey-web:1",
@@ -325,7 +339,7 @@ func TestRunnerRun_StopsOnRestoreFailure(t *testing.T) {
 	// After a restore failure the web must be rolled back to 0 (via deferred
 	// rollback) but scale-to-1, API checks, and cleanup must never run.
 	for _, c := range dep.calls {
-		if c == "db-analyze" || c == "scale:misskey-web:1" || c == "misskey-readiness" || c == "misskey-global-timeline" || c == "scale:misskey-db-v18:0" {
+		if c == "db-analyze" || c == "db-size" || c == "scale:misskey-web:1" || c == "misskey-readiness" || c == "misskey-global-timeline" || c == "scale:misskey-db-v18:0" {
 			t.Fatalf("calls = %v, unexpected call %q after restore failure", dep.calls, c)
 		}
 	}
@@ -354,7 +368,7 @@ func TestRunnerRun_AnalyzeFailureDoesNotStartWebAndRecoversWebOnly(t *testing.T)
 	if !strings.Contains(err.Error(), "db analyze") {
 		t.Fatalf("error = %v, want it to mention db analyze", err)
 	}
-	assertCallTail(t, dep.calls, []string{"db-restore", "db-analyze", "scale:misskey-web:0"})
+	assertCallTail(t, dep.calls, []string{"db-restore", "db-size", "db-analyze", "scale:misskey-web:0"})
 	assertNoCalls(t, dep.calls, "scale:misskey-web:1", "misskey-readiness", "misskey-global-timeline", "scale:misskey-db-v18:0")
 
 	wantReplicas := []int{0, 1, 0}
@@ -365,6 +379,50 @@ func TestRunnerRun_AnalyzeFailureDoesNotStartWebAndRecoversWebOnly(t *testing.T)
 		if dep.scaleReplicas[i] != wantReplicas[i] {
 			t.Fatalf("scaleReplicas[%d] = %d, want %d (full: %v)", i, dep.scaleReplicas[i], wantReplicas[i], dep.scaleReplicas)
 		}
+	}
+}
+
+func TestRunnerRun_SizeFailureIsBestEffort(t *testing.T) {
+	dep := &recordingDep{dbSizeErr: errors.New("size unavailable"), dbSize: 123}
+	r := newTestRunner(dep)
+	result := newExecutionResult(time.Now())
+	if err := result.beginPhase(phasePreflight, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if err := result.completePhase(time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	result.markInitialized()
+	if err := r.runWithResult(context.Background(), testConfig(), result); err != nil {
+		t.Fatalf("run failed: %v", err)
+	}
+	if countCalls(dep.calls, "db-size") != 1 {
+		t.Fatalf("size query calls = %v", dep.calls)
+	}
+	if !result.databaseSizeAttempted || result.databaseSizeAvailable {
+		t.Fatalf("size state = attempted %t available %t", result.databaseSizeAttempted, result.databaseSizeAvailable)
+	}
+}
+
+func TestRunnerRun_VerifyFailureRetainsMeasuredSizes(t *testing.T) {
+	dep := &recordingDep{dbSize: 456, failOn: map[string]error{"misskey-readiness": errors.New("unready")}}
+	r := newTestRunner(dep)
+	result := newExecutionResult(time.Now())
+	if err := result.beginPhase(phasePreflight, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if err := result.completePhase(time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	result.markInitialized()
+	if err := r.runWithResult(context.Background(), testConfig(), result); err == nil {
+		t.Fatal("expected verification failure")
+	}
+	if !result.databaseSizeAttempted || !result.databaseSizeAvailable || result.databaseSize != 456 {
+		t.Fatalf("database size state lost: %+v", result.safeSummary(time.Now()))
+	}
+	if result.object == nil || result.object.Size != 42 {
+		t.Fatalf("S3 object size lost: %+v", result.object)
 	}
 }
 
@@ -408,6 +466,7 @@ func TestRunnerRun_StopsOnWebStartWaitFailure(t *testing.T) {
 
 	assertCallTail(t, dep.calls, []string{
 		"db-restore",
+		"db-size",
 		"db-analyze",
 		"scale:misskey-web:1",
 		"wait:misskey-web:1",

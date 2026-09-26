@@ -2,6 +2,7 @@ package restore
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"testing"
 
@@ -21,6 +22,30 @@ func envForRun() map[string]string {
 		"DB_USER":          "misskey",
 		"DB_PASS":          "secret",
 		"MISSKEY_BASE_URL": "https://misskey.example",
+	}
+}
+
+func TestRunWithSummary_ReportsDeferredDumpCleanupFailureAndPreservesRunError(t *testing.T) {
+	for k, v := range envForRun() {
+		t.Setenv(k, v)
+	}
+	runErr := errors.New("restore failed")
+	cleanupErr := errors.New("temporary file cleanup failed")
+	orig := runnerFactory
+	t.Cleanup(func() { runnerFactory = orig })
+	runnerFactory = func(_ context.Context, _ *config.Config, logger *slog.Logger) (*runner, error) {
+		dep := &recordingDep{failOn: map[string]error{"db-restore": runErr}, dumpCleanup: func() error { return cleanupErr }}
+		return &runner{db: dep, s3: dep, k8s: dep, api: dep, logger: logger}, nil
+	}
+	summary, err := runWithSummaryLogger(context.Background(), nil, nil)
+	if !errors.Is(err, runErr) {
+		t.Fatalf("run error = %v, want original restore error", err)
+	}
+	if summary.TempCleanupStatus != "error" {
+		t.Fatalf("cleanup status = %q, want error", summary.TempCleanupStatus)
+	}
+	if !summary.RecoveryAttempted || summary.RecoveryStatus != "success" {
+		t.Fatalf("file deletion failure overwrote recovery outcome: %+v", summary)
 	}
 }
 
