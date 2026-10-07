@@ -40,6 +40,18 @@ type RestoreResult struct {
 	Recovery              *Phase
 	TempCleanup           *Phase
 }
+
+// BackupResult contains only metrics and fixed state identifiers, never raw errors.
+type BackupResult struct {
+	Success             bool
+	FailedPhase         string
+	BackupSize          int64
+	BackupSizeAvailable bool
+	UploadVerified      bool
+	Total               time.Duration
+	Phases              []Phase
+}
+
 type Phase struct {
 	Name, Status string
 	Duration     time.Duration
@@ -50,6 +62,15 @@ type Phase struct {
 // the restore operation when a notification should still be attempted after
 // that operation is canceled.
 func SendRestoreResult(ctx context.Context, webhookURL string, result RestoreResult) error {
+	return sendDiscordResult(ctx, webhookURL, FormatRestoreResult(result))
+}
+
+// SendBackupResult sends a generic backup result to a Discord webhook.
+func SendBackupResult(ctx context.Context, webhookURL string, result BackupResult) error {
+	return sendDiscordResult(ctx, webhookURL, FormatBackupResult(result))
+}
+
+func sendDiscordResult(ctx context.Context, webhookURL, content string) error {
 	ctx, cancel := context.WithTimeout(ctx, requestTimeout)
 	defer cancel()
 
@@ -59,7 +80,7 @@ func SendRestoreResult(ctx context.Context, webhookURL string, result RestoreRes
 	}
 
 	payload := discordPayload{
-		Content: FormatRestoreResult(result),
+		Content: content,
 		AllowedMentions: allowedMentions{
 			Parse: []string{},
 		},
@@ -150,6 +171,70 @@ func FormatRestoreResult(r RestoreResult) string {
 	}
 	return content
 }
+
+// FormatBackupResult formats a bounded message using only known phase labels.
+func FormatBackupResult(r BackupResult) string {
+	state := "failed"
+	if r.Success {
+		state = "succeeded"
+	}
+	lines := []string{"backup " + state}
+	labels := map[string]string{
+		"preflight": "事前確認",
+		"dump":      "ダンプ作成",
+		"validate":  "gzip検証",
+		"upload":    "S3保存",
+		"cleanup":   "後処理",
+	}
+	if label, ok := labels[r.FailedPhase]; ok {
+		lines = append(lines, "失敗フェーズ: "+label)
+	}
+	verified := "未確認"
+	if r.UploadVerified {
+		verified = "確認済み"
+	}
+	lines = append(lines,
+		"gzipサイズ: "+sizeText(r.BackupSize, r.BackupSizeAvailable),
+		"S3保存確認: "+verified,
+		"合計: "+durationText(r.Total),
+	)
+
+	phaseByName := make(map[string]Phase, len(labels))
+	for _, p := range r.Phases {
+		if _, ok := labels[p.Name]; ok {
+			phaseByName[p.Name] = p
+		}
+	}
+	for _, name := range []string{"preflight", "dump", "validate", "upload", "cleanup"} {
+		p, ok := phaseByName[name]
+		if !ok {
+			lines = append(lines, labels[name]+": 未実行")
+			continue
+		}
+		lines = append(lines, labels[name]+": "+backupPhaseText(p))
+	}
+
+	content := strings.Join(lines, "\n")
+	// Keep well below Discord's 2000-character limit.
+	if len([]rune(content)) > 1800 {
+		content = string([]rune(content)[:1797]) + "..."
+	}
+	return content
+}
+
+func backupPhaseText(p Phase) string {
+	switch p.Status {
+	case "success":
+		return durationText(p.Duration)
+	case "failure":
+		return durationText(p.Duration) + "（失敗）"
+	case "skipped":
+		return "未実行"
+	default:
+		return "状態不明"
+	}
+}
+
 func phaseText(p Phase) string {
 	if p.Status == "skipped" {
 		return "未実行"

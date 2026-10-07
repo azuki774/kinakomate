@@ -189,3 +189,73 @@ func TestSendRestoreResultRejectsNonSuccessStatus(t *testing.T) {
 		t.Fatal("expected non-2xx response to fail")
 	}
 }
+func TestFormatBackupResultReportsSavedCleanupFailureWithoutUntrustedValues(t *testing.T) {
+	result := BackupResult{
+		FailedPhase:         "cleanup",
+		BackupSize:          2048,
+		BackupSizeAvailable: true,
+		UploadVerified:      true,
+		Total:               5 * time.Second,
+		Phases: []Phase{
+			{Name: "preflight", Status: "success", Duration: time.Second},
+			{Name: "dump", Status: "success", Duration: time.Second},
+			{Name: "validate", Status: "success", Duration: time.Second},
+			{Name: "upload", Status: "success", Duration: time.Second},
+			{Name: "cleanup", Status: "failure", Duration: 2 * time.Second},
+		},
+	}
+	message := FormatBackupResult(result)
+	for _, want := range []string{"backup failed", "失敗フェーズ: 後処理", "2.00 KiB", "S3保存確認: 確認済み", "後処理: 2s（失敗）"} {
+		if !strings.Contains(message, want) {
+			t.Errorf("formatted backup notification missing %q: %s", want, message)
+		}
+	}
+
+	untrusted := FormatBackupResult(BackupResult{
+		FailedPhase: "DB_PASSWORD=secret",
+		Phases:      []Phase{{Name: "SQL body secret", Status: "secret status"}},
+	})
+	for _, secret := range []string{"DB_PASSWORD", "secret", "SQL body"} {
+		if strings.Contains(untrusted, secret) {
+			t.Errorf("formatted notification leaked untrusted value %q: %s", secret, untrusted)
+		}
+	}
+}
+
+func TestSendBackupResultUsesSafeDiscordPayload(t *testing.T) {
+	var gotPayload map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			t.Errorf("method = %q, want POST", r.Method)
+		}
+		if r.Header.Get("Content-Type") != "application/json" {
+			t.Errorf("content type = %q, want application/json", r.Header.Get("Content-Type"))
+		}
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Errorf("read request body: %v", err)
+			return
+		}
+		if err := json.Unmarshal(body, &gotPayload); err != nil {
+			t.Errorf("decode request body: %v", err)
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+
+	if err := SendBackupResult(context.Background(), server.URL, BackupResult{Success: true}); err != nil {
+		t.Fatalf("SendBackupResult returned error: %v", err)
+	}
+	content, ok := gotPayload["content"].(string)
+	if !ok || !strings.HasPrefix(content, "backup succeeded") {
+		t.Errorf("content = %v, want backup success", gotPayload["content"])
+	}
+	allowed, ok := gotPayload["allowed_mentions"].(map[string]any)
+	if !ok {
+		t.Fatalf("allowed_mentions = %T, want object", gotPayload["allowed_mentions"])
+	}
+	parse, ok := allowed["parse"].([]any)
+	if !ok || len(parse) != 0 {
+		t.Errorf("allowed_mentions.parse = %v, want empty array", allowed["parse"])
+	}
+}

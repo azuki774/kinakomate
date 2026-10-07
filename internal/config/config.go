@@ -258,3 +258,87 @@ func (c *Config) Loggable() map[string]any {
 		"gtl_retry_timeout_seconds":   int64(c.GTLRetryTimeout / time.Second),
 	}
 }
+
+// BackupConfig holds only the inputs needed to create and upload one database
+// dump. It is separate from Config so backup does not require restore settings.
+type BackupConfig struct {
+	DBHost     string
+	DBPort     string
+	DBUser     string
+	DBPass     string
+	DBName     string
+	S3Region   string
+	S3Bucket   string
+	S3Key      string
+	S3Endpoint string
+}
+
+// LoadBackupFromEnv reads and validates the backup-specific environment.
+// Values such as DB_PASS, DB_NAME, and S3_KEY are preserved exactly as set.
+func LoadBackupFromEnv() (*BackupConfig, error) {
+	dbHost, err := requiredBackupValue("DB_HOST")
+	if err != nil {
+		return nil, err
+	}
+	dbPort, err := requiredBackupValue("DB_PORT")
+	if err != nil {
+		return nil, err
+	}
+	dbUser, err := requiredBackupValue("DB_USER")
+	if err != nil {
+		return nil, err
+	}
+	dbPass, err := requiredBackupValue("DB_PASS")
+	if err != nil {
+		return nil, err
+	}
+	dbName, err := requiredBackupValue("DB_NAME")
+	if err != nil {
+		return nil, err
+	}
+	s3Region, err := requiredBackupValue("S3_REGION")
+	if err != nil {
+		return nil, err
+	}
+	s3Bucket, err := requiredBackupValue("S3_BUCKET")
+	if err != nil {
+		return nil, err
+	}
+	s3Key, err := requiredBackupValue("S3_KEY")
+	if err != nil {
+		return nil, err
+	}
+
+	port, err := strconv.ParseUint(dbPort, 10, 16)
+	if err != nil || port == 0 {
+		return nil, fmt.Errorf("DB_PORT must be an integer from 1 through 65535")
+	}
+
+	endpoint := os.Getenv("S3_ENDPOINT")
+	if endpoint != "" {
+		u, err := url.Parse(endpoint)
+		if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+			return nil, fmt.Errorf("S3_ENDPOINT must be an http or https URL with a host")
+		}
+	}
+
+	return &BackupConfig{
+		DBHost:     dbHost,
+		DBPort:     dbPort,
+		DBUser:     dbUser,
+		DBPass:     dbPass,
+		DBName:     dbName,
+		S3Region:   s3Region,
+		S3Bucket:   s3Bucket,
+		S3Key:      s3Key,
+		S3Endpoint: endpoint,
+	}, nil
+}
+
+func requiredBackupValue(name string) (string, error) {
+	value := os.Getenv(name)
+	if value == "" {
+		return "", fmt.Errorf("required input %s is missing or empty", name)
+	}
+	return value, nil
+}
