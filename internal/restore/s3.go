@@ -9,11 +9,11 @@ import (
 	"os"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
-	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 
 	"github.com/azuki774/kinakomate/internal/config"
 	"github.com/azuki774/kinakomate/internal/log"
+	"github.com/azuki774/kinakomate/internal/storage"
 )
 
 // s3API is the subset of the AWS S3 client the runner uses. It lets tests
@@ -41,21 +41,10 @@ func newObjectStorage(ctx context.Context, cfg *config.Config, logger *slog.Logg
 	if logger == nil {
 		logger = log.New()
 	}
-	loadOpts := []func(*awsconfig.LoadOptions) error{}
-	if cfg.S3Region != "" {
-		loadOpts = append(loadOpts, awsconfig.WithRegion(cfg.S3Region))
-	}
-	awsCfg, err := awsconfig.LoadDefaultConfig(ctx, loadOpts...)
+	client, err := storage.NewS3Client(ctx, cfg.S3Region, cfg.S3Endpoint)
 	if err != nil {
-		return nil, fmt.Errorf("load AWS config: %w", err)
+		return nil, err
 	}
-
-	client := s3.NewFromConfig(awsCfg, func(o *s3.Options) {
-		o.UsePathStyle = cfg.S3Endpoint != ""
-		if cfg.S3Endpoint != "" {
-			o.BaseEndpoint = aws.String(cfg.S3Endpoint)
-		}
-	})
 
 	return &objectStorage{
 		client: client,

@@ -6,9 +6,11 @@ import (
 	"encoding/json"
 	"errors"
 	"flag"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/azuki774/kinakomate/internal/backup"
 	"github.com/azuki774/kinakomate/internal/notification"
 	"github.com/azuki774/kinakomate/internal/restore"
 )
@@ -245,5 +247,82 @@ func TestNotificationFailureDoesNotFailSuccessfulRestore(t *testing.T) {
 	}
 	if err := run(context.Background(), []string{"restore-test"}); err != nil {
 		t.Fatal(err)
+	}
+}
+func TestRunBackupNotifiesCleanupFailureWithVerifiedUpload(t *testing.T) {
+	t.Setenv(discordNotificationWebhookEnv, "https://discord.example/webhook-secret")
+	oldRun, oldNotify := runBackup, sendBackupNotification
+	t.Cleanup(func() { runBackup, sendBackupNotification = oldRun, oldNotify })
+
+	backupErr := errors.New("private DB password, SQL, and command stderr")
+	runBackup = func(ctx context.Context, _ []string) (backup.RunSummary, error) {
+		if !errors.Is(ctx.Err(), context.Canceled) {
+			t.Error("backup runner did not receive canceled context")
+		}
+		return backup.RunSummary{
+			FailedPhase:         "cleanup",
+			BackupSize:          2048,
+			BackupSizeAvailable: true,
+			UploadVerified:      true,
+			Total:               5 * time.Second,
+			Phases: []backup.PhaseSummary{
+				{Name: "upload", Status: "success", Duration: time.Second},
+				{Name: "cleanup", Status: "failure", Duration: 2 * time.Second},
+			},
+		}, backupErr
+	}
+
+	notified := false
+	sendBackupNotification = func(ctx context.Context, webhookURL string, result notification.BackupResult) error {
+		notified = true
+		if ctx.Err() != nil {
+			t.Errorf("notification context is canceled: %v", ctx.Err())
+		}
+		if result.Success || !result.UploadVerified {
+			t.Errorf("incorrect cleanup result: %+v", result)
+		}
+		message := notification.FormatBackupResult(result)
+		if strings.Contains(message, backupErr.Error()) || strings.Contains(message, "webhook-secret") {
+			t.Errorf("notification leaked sensitive data: %q", message)
+		}
+		return nil
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := run(ctx, []string{"backup"}); !errors.Is(err, backupErr) {
+		t.Fatalf("run error = %v, want backup error", err)
+	}
+	if !notified {
+		t.Fatal("backup failure was not notified")
+	}
+}
+
+func TestRunBackupSkipsHelpNotificationAndIgnoresNotificationFailure(t *testing.T) {
+	t.Setenv(discordNotificationWebhookEnv, "https://discord.example/webhook")
+	oldRun, oldNotify := runBackup, sendBackupNotification
+	t.Cleanup(func() { runBackup, sendBackupNotification = oldRun, oldNotify })
+
+	notifications := 0
+	sendBackupNotification = func(context.Context, string, notification.BackupResult) error {
+		notifications++
+		return errors.New("webhook secret transport details")
+	}
+	runBackup = backup.RunWithSummary
+	if err := run(context.Background(), []string{"backup", "--help"}); err != nil {
+		t.Fatalf("help failed: %v", err)
+	}
+	if notifications != 0 {
+		t.Fatalf("help notifications = %d, want 0", notifications)
+	}
+
+	runBackup = func(context.Context, []string) (backup.RunSummary, error) {
+		return backup.RunSummary{UploadVerified: true}, nil
+	}
+	if err := run(context.Background(), []string{"backup"}); err != nil {
+		t.Fatalf("notification failure changed backup result: %v", err)
+	}
+	if notifications != 1 {
+		t.Fatalf("notifications = %d, want 1", notifications)
 	}
 }

@@ -1,4 +1,4 @@
-.PHONY: build test vet lint docker-build docker-push clean
+.PHONY: build test vet lint docker-build docker-push integration-backup clean
 
 BINARY := kinakomate
 IMAGE_REPO := ghcr.io/azuki774/kinakomate
@@ -21,6 +21,9 @@ docker-build:
 
 docker-push: docker-build
 	docker push $(IMAGE_REPO):$(TAG)
+
+integration-backup:
+	sh scripts/integration-backup.sh
 
 clean:
 	rm -rf bin
