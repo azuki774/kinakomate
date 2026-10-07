@@ -1,148 +1,58 @@
 # kinakomate
 
-[misskey](https://misskey-hub.net/) 系サービスの運用を支援するツール群のリポジトリです。
+[Misskey](https://misskey-hub.net/) 系サービスのバックアップから、実際に復旧できることを検証する Go 製 CLI です。
+`restore-test` は S3 の gzip 圧縮 SQL ダンプを PostgreSQL に復元し、web 起動後に API からデータを確認します。
 
-主な機能は、データベースのリストア復旧を検証する restore-test機能です。
+> **復元先の `misskey` データベースは毎回削除・再作成されます。本番ではなく、復元検証専用の環境で実行してください。**
 
-## ドキュメント
+## 実行
 
-- [AGENTS.md](AGENTS.md) — このリポジトリのAIエージェント向けルール
-- [Issue 一覧](https://github.com/azuki774/kinakomate/issues) — 現在の実装計画
+コンテナは `ghcr.io/azuki774/kinakomate:<コミットSHA>`。Kubernetes 内で環境変数を注入し、コンテナの引数に `restore-test` を指定します。
+設定一覧は [env.example](env.example)（必須項目・既定値・認証情報）を参照してください。ファイルの自動読み込みは行いません。
 
-## 入力環境変数
+実行前に用意するもの:
 
-`restore-test` は以下の環境変数を入力として受け取ります。`DB_PASS` と S3 認証情報はログ出力の対象外です。
+- 同じ namespace の web／DB workload（Deployment または StatefulSet）。`POD_NAMESPACE` を明示的に注入してください。未設定時は `default` を操作します。
+- 実行用 ServiceAccount と RBAC。対象 namespace の `apps` API group の `deployments`／`statefulsets` に `get`／`update` を許可し、`resourceNames` を対象の2つの workload 名に限定します。
+- S3 の固定オブジェクトを読み取れる AWS 認証情報と、gzip 圧縮されたプレーン SQL ダンプ。
+- `postgres` DB への接続、対象 DB の所有権、`CREATEDB`、復元先テーブルなどの `ANALYZE` が可能な DB ユーザー。
+- gzip ダンプを保存できる書き込み可能な一時領域（通常 `/tmp`）。コンテナには `psql` を同梱しています。
 
-| 変数 | 必須 | 説明 |
-|---|---|---|
-| `WEB_WORKLOAD` | yes | スケール制御対象の web Kubernetes workload 名（RFC 1123 label） |
-| `DB_WORKLOAD` | yes | スケール制御対象の db Kubernetes workload 名（RFC 1123 label） |
-| `S3_REGION` | yes | バックアップ bucket のリージョン |
-| `S3_BUCKET` | yes | 固定バックアップ object を含む bucket |
-| `S3_KEY` | yes | 固定バックアップ object の key（世代選択はしない固定 key のみ取得） |
-| `S3_ENDPOINT` | no | S3-compatible endpoint。未設定なら AWS デフォルト endpoint、設定時は path-style でアクセス |
-| `DB_HOST` | yes | 復元先 PostgreSQL の host |
-| `DB_PORT` | yes | 復元先 PostgreSQL の port |
-| `DB_USER` | yes | 復元先 PostgreSQL の user |
-| `DB_PASS` | yes | 復元先 PostgreSQL の password（ログに出さない） |
-| `DB_ANALYZE_TIMEOUT_SECONDS` | no | 復元後の `ANALYZE` の最大時間（秒）。既定値 `900`（15分）、範囲 `1`〜`2147483` |
-| `MISSKEY_BASE_URL` | yes | 復元確認対象の Misskey URL。`http` / `https` の host を含む origin（末尾の `/` は任意） |
-| `MISSKEY_GTL_REQUEST_TIMEOUT_SECONDS` | no | GTL 1回あたりのHTTP処理タイムアウト（秒）。既定値 `10` |
-| `MISSKEY_GTL_RETRY_INTERVAL_SECONDS` | no | GTLの再試行前に待機する秒数。既定値 `30` |
-| `MISSKEY_GTL_RETRY_TIMEOUT_SECONDS` | no | GTLの初回試行開始から、HTTP処理と待機を含めた最大再試行時間（秒）。既定値 `300` |
-| `DISCORD_NOTIFICATION_WEBHOOK` | no | restore-test の成功／失敗を通知する Discord webhook URL。未設定なら通知しない（ログに出さない） |
+CronJob・RBAC・Secret などのデプロイ定義は別のインフラリポジトリで管理します。runner は Kubernetes API から Secret を取得しません。
 
-復元先のデータベース名は固定値 `misskey` です（環境変数では指定しません）。
-`MISSKEY_BASE_URL` には user/password、root 以外の path、query、fragment を含められません。
+## 検証の流れ
 
-## Discord 通知
+1. 設定・接続を確認し、S3 の固定キーからダンプを取得して gzip を検証。
+2. web を 0 replica、DB を 1 replica にし、停止・起動を待って DB 接続を確認。
+3. 既存接続を切断し、`misskey` DB を `template0` から再作成。SQL を単一トランザクションで復元し、エラー時は中断。
+4. web 起動前に `ANALYZE` で統計情報を更新。タイムアウトや警告を含む診断出力も失敗として扱います。
+5. web を 1 replica にし、`GET /healthz` の成功と `POST /api/notes/global-timeline`（GTL）で Note を1〜10件取得できることを確認。
+6. 成功時は web／DB をともに 0 replica に設定。一時ファイルを削除。
 
-`DISCORD_NOTIFICATION_WEBHOOK` を設定すると、終了時に成功／失敗、失敗フェーズ、
-DB サイズ、S3 の gzip バックアップサイズ、合計時間と処理別の時間を通知します。
+GTL の DB timeout・HTTP 5xx・通信エラーは再試行します。HTTP 4xx／3xx や不正なレスポンスは再試行しません。時間設定は [env.example](env.example) を参照してください。
+初期化後の失敗時は web を 0 replica にする処理を試み、DB の停止処理は行いません。元の replica 数には戻しません。
 
-- DB サイズは復元成功直後・web 起動前に `pg_database_size(current_database())` で取得する対象 DB 全体のサイズです。PVC や WAL の使用量、展開後 SQL のサイズではありません。
-- S3 サイズはダウンロード・gzip 検証が完了したオブジェクトの GET 応答から取得します。ContentLength がない場合は受信したバイト数を使用します。表示単位は KiB / MiB / GiB などの 1024 基数です。
-- 時間は「事前確認」「準備・バックアップ取得」「DB復元」「起動・API検証」「後処理」にまとめます。合計には失敗後の後処理と一時ファイル削除を含み、Discord への送信時間は含みません。
-- 未取得のサイズや未実行の処理はゼロと区別します。DB サイズ取得は最大10秒で、取得失敗や通知失敗だけでは検証結果・終了コードを変更しません。
-- 通知にはエラー本文、DB 接続先、S3 の bucket/key を含めません。Webhook 未設定時とヘルプ表示時は送信しません。
+## 結果の確認
 
-## 復元後の ANALYZE と検証
+- 終了コードは成功時 `0`、入力・復元・検証・後処理などの失敗時 `1`。
+- stderr に JSON ログを出力し、`restore-test final report` に `preflight`／`prepare`／`restore`／`verify`／`cleanup` の結果・所要時間をまとめます。
+- DB パスワード・AWS 認証情報・Discord webhook URL はログに出しません。DB 接続先や S3 bucket/key は記録されるため、ログの扱いに注意してください。
+- `DISCORD_NOTIFICATION_WEBHOOK` 設定時は、成功／失敗・失敗フェーズ・復元直後の DB サイズ・gzip バックアップサイズ・処理時間を通知します。DB サイズ取得や通知だけの失敗は終了コードを変更しません。
 
-SQL ダンプの復元に成功すると、web 起動前に復元先 DB へ別の `psql` 接続を開き、
-`ANALYZE` を実行して planner 統計情報を更新します。ダンプには含まれない統計情報を
-アプリケーション起動前に作成し、統計情報不足による GTL クエリの遅延・タイムアウトを
-抑えることが目的です。アプリケーションの readiness と GTL の成功は引き続き API で検証します。
-この処理全体は `DB_ANALYZE_TIMEOUT_SECONDS` で指定した時間（既定15分）を超えると失敗します。
-PostgreSQL の `statement_timeout` は同じ値、`lock_timeout` はその値と30秒のうち
-短い方に設定します。どちらもこの `psql` セッションだけに適用され、DB に永続化されません。
-システムスキーマ（`pg_*` と `information_schema`）を除き、通常テーブル、
-パーティションテーブル、マテリアライズドビューを個別に ANALYZE します。
-識別子は PostgreSQL 側で引用して組み立てるため、引用符を含む名前にも対応します。
-`DB_USER` に superuser 権限は不要です。`psql` が成功終了しても stderr に空白以外の
-出力があれば警告を含む診断とみなして失敗させます。権限不足などで統計情報を更新
-できないテーブルなどを見逃さないためです。
+## 開発
 
-ANALYZE に成功した後、web を 1 replica で起動し、`GET /healthz` の成功を待ちます。
-続いて `POST /api/notes/global-timeline` で最新の Note を 1〜10 件取得し、
-復元データを API から参照できることを確認します。
-GTL は1回あたり10秒（`MISSKEY_GTL_REQUEST_TIMEOUT_SECONDS`）で実行し、
-DBのコールドキャッシュなどによるDB timeout、HTTP 5xx、通信エラーまたは通信timeout
-の場合だけ、30秒（`MISSKEY_GTL_RETRY_INTERVAL_SECONDS`）待って再試行します。
-初回試行から5分（`MISSKEY_GTL_RETRY_TIMEOUT_SECONDS`）を過ぎると失敗します。
-HTTP 4xx/3xxやレスポンス形式不正は再試行しません。3つの環境変数は正の整数秒で指定します。
+Go のバージョンは [go.mod](go.mod)、開発環境は [flake.nix](flake.nix) を参照してください。
 
-## Kubernetes RBAC
-
-Kubernetes の標準 ServiceAccount 権限では workload の参照や replica 数の変更は
-できません。`restore-test` の実行用 ServiceAccount には、対象 workload と同じ
-namespace で次の権限を追加してください。`resourceNames` は各環境の
-`WEB_WORKLOAD` と `DB_WORKLOAD` の値に置き換えます。
-
-```yaml
-apiVersion: rbac.authorization.k8s.io/v1
-kind: Role
-metadata:
-  name: kinakomate-restore-test
-rules:
-  - apiGroups: ["apps"]
-    resources: ["deployments", "statefulsets"]
-    resourceNames:
-      - "<WEB_WORKLOAD の値>"
-      - "<DB_WORKLOAD の値>"
-    verbs: ["get", "update"]
+```sh
+make build          # bin/kinakomate を生成
+./bin/kinakomate --help
+make test
+make vet
+make lint           # golangci-lint が必要
+make docker-build
+# make docker-push  # コミットSHAタグで GHCR に push（認証が必要）
 ```
 
-この `Role` を実行用 ServiceAccount に割り当てる `RoleBinding` は、CronJob などと
-同様にデプロイ先のインフラ定義で管理してください。runner は Kubernetes API から
-Secret を取得しないため、`secrets` に対する権限は不要です。
+ローカルでのビルドやヘルプ表示にクラスタは不要です。復元処理は Kubernetes の in-cluster 認証を使うため、kubeconfig でのローカル実行には対応していません。
 
-## データベースの再作成（リストア前の初期化）
-
-プレーン SQL のダンプには既存オブジェクトを消す `--clean` 相当の処理がないため、
-runner はリストアの直前に必ず対象データベースを作り直します。接続先は
-maintenance database の `postgres` で、次の順に実行します。
-
-1. 対象データベースへの残存接続を `pg_terminate_backend` で切断
-2. `DROP DATABASE IF EXISTS misskey;`
-3. `CREATE DATABASE misskey TEMPLATE template0;`（`DB_USER` が owner になる）
-
-その後に gzip ダンプを `psql --single-transaction --set ON_ERROR_STOP=1` で
-流し込みます。この初期化は対象データベースを完全に置き換える破壊的操作のため、
-runner を向けた環境では対象 DB 内のデータは常に失われます。
-
-必要な権限: `DB_USER` は `postgres` maintenance database に接続でき、かつ
-対象データベースの ownership と `CREATEDB` 権限を持つ必要があります。
-
-## ログと終了コード
-
-`restore-test` は stderr へ JSON の構造化ログを出力します。処理終了時には
-`restore-test final report` という最終レコードを 1 件出力し、次の5フェーズの
-結果と所要時間をまとめます。
-
-- `preflight`: 入力検証と runner 初期化
-- `prepare`: 接続確認、レプリカ確認、S3 object の取得・検証
-- `restore`: web／DB の scale、DB 初期化、PostgreSQL 復元と `ANALYZE`
-- `verify`: web 起動と checks
-- `cleanup`: 成功時の web／DB 停止。失敗時は web を 0 replica に戻す復旧
-
-各フェーズには `status`（`success`、`failure`、`skipped`）、`duration_ms`、
-人間向けの `duration` が含まれます。最終レコードには全体の
-`total_duration_ms` / `total_duration` も含まれます。S3 object を取得できた
-場合は `object.bucket`、`object.key`、`object.etag`、`object.size` も記録します。
-ローカルの一時ファイルパス、`DB_PASS`、AWS credential はログへ出力しません。
-
-全フェーズ成功時の終了コードは `0` です。入力検証、初期化、復元、`ANALYZE`、checks、
-cleanup のいずれかが失敗した場合は非 `0` になります。初期化後の失敗時は
-調査用に DB 側を停止せず、web だけを 0 replica に戻します。
-
-## S3 認証情報の依存
-
-S3 への read-only アクセスは、AWS SDK の標準 credential chain が環境変数
-`AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY`（必要に応じて
-`AWS_SESSION_TOKEN`）から読み取る方式を採用しています。kinakomate 自体は
-Kubernetes API から Secret を取得せず、配布・注入はインフラ定義側
-（CronJob / manifest / Secret / Infisical）の別作業として管理します。
-
-## ライセンス
-
-[MIT License](LICENSE)
+[AI エージェント向けルール](AGENTS.md) · [Issue 一覧](https://github.com/azuki774/kinakomate/issues) · [MIT License](LICENSE)
