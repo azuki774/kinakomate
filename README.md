@@ -77,12 +77,12 @@ make test
 make vet
 make lint           # golangci-lint が必要
 make docker-build
-make integration-backup # 実イメージ・PostgreSQL・S3 を使った保存/復元検証
+make test-backup-integration # 実イメージ・PostgreSQL・S3 を使った結合テスト
 # make docker-push  # コミットSHAタグで GHCR に push（認証が必要）
 ```
 
 ローカルでのビルド、ヘルプ表示、`backup` にクラスタは不要です。復元処理は Kubernetes の in-cluster 認証を使うため、kubeconfig でのローカル実行には対応していません。
 
-結合検証には Docker、または `CONTAINER_ENGINE=podman make integration-backup` で Podman を使用します。検証用コンテナ・ネットワークを作成し、終了時に削除します。実運用の認証情報や保存先は使用しません。
+`scripts/test-backup-integration.sh` は CI とローカルで共用する結合テスト専用スクリプトです。本番バックアップの実行には使いません。Docker、または `CONTAINER_ENGINE=podman make test-backup-integration` で Podman を使用し、テスト用コンテナ・ネットワークを作成して終了時に削除します。実運用の認証情報や保存先は使用しません。
 
 [AI エージェント向けルール](AGENTS.md) · [Issue 一覧](https://github.com/azuki774/kinakomate/issues) · [MIT License](LICENSE)

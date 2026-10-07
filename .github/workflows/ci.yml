@@ -31,8 +31,9 @@ jobs:
       - run: go vet ./...
       - run: go test ./...
 
-  integration-backup:
+  test-backup-integration:
+    name: Backup integration test
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - run: make integration-backup
+      - run: make test-backup-integration

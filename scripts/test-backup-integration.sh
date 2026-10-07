@@ -1,4 +1,5 @@
 #!/bin/sh
+# Integration test only: creates disposable PostgreSQL/S3 fixtures, not production backups.
 set -eu
 
 SCRIPT_DIR=$(CDPATH= cd "$(dirname "$0")" && pwd)
