@@ -3,6 +3,7 @@ name: docker-push
 on:
   push:
     branches: [master]
+    tags: ['*']
   workflow_dispatch:
 
 permissions:
@@ -28,13 +29,21 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Determine image tag
+      - name: Determine image tags
         id: tag
-        run: echo "sha=$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
+        run: |
+          {
+            echo 'tags<<EOF'
+            echo "${IMAGE_REPO}:$(git rev-parse --short HEAD)"
+            if [[ "$GITHUB_REF_TYPE" == "tag" ]]; then
+              echo "${IMAGE_REPO}:${GITHUB_REF_NAME}"
+            fi
+            echo EOF
+          } >> "$GITHUB_OUTPUT"
 
       - name: Build and push
         uses: docker/build-push-action@471d1dc4e07e5cdedd4c2171150001c434f0b7a4 # v6
         with:
           context: .
           push: true
-          tags: ${{ env.IMAGE_REPO }}:${{ steps.tag.outputs.sha }}
+          tags: ${{ steps.tag.outputs.tags }}

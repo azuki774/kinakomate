@@ -7,7 +7,7 @@
 
 ## 実行
 
-コンテナは `ghcr.io/azuki774/kinakomate:<コミットSHA>`。環境変数を注入し、コンテナの引数に `backup` または `restore-test` を指定します。PostgreSQL 18 系の `pg_dump` と `psql` を同梱しています。
+コンテナは `ghcr.io/azuki774/kinakomate:<短縮コミットSHA>` または `ghcr.io/azuki774/kinakomate:<Gitタグ>`。環境変数を注入し、コンテナの引数に `backup` または `restore-test` を指定します。PostgreSQL 18 系の `pg_dump` と `psql` を同梱しています。
 設定一覧は [env.example](env.example)（必須項目・既定値・認証情報）を参照してください。ファイルの自動読み込みは行いません。
 
 ### backup
@@ -79,6 +79,15 @@ make lint           # golangci-lint が必要
 make docker-build
 make test-backup-integration # 実イメージ・PostgreSQL・S3 を使った結合テスト
 # make docker-push  # コミットSHAタグで GHCR に push（認証が必要）
+```
+
+`master` の push 時は短縮コミット SHA タグで GHCR に公開します。Git タグを push すると、同じイメージを Git タグ名と短縮コミット SHA の両方で公開します。Git タグ名には Docker イメージタグとして有効な名前を使ってください。公開 workflow を含むコミットにタグを付け、workflow の成功後に利用します。
+
+```sh
+git tag 1.0.1
+git push origin 1.0.1
+# 公開完了後
+docker pull ghcr.io/azuki774/kinakomate:1.0.1
 ```
 
 ローカルでのビルド、ヘルプ表示、`backup` にクラスタは不要です。復元処理は Kubernetes の in-cluster 認証を使うため、kubeconfig でのローカル実行には対応していません。
