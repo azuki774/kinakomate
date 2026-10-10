@@ -15,12 +15,17 @@ var phaseErrors = [...]error{
 	errors.New("backup cleanup failed"),
 }
 
-// RunSummary contains only operational metrics safe to pass to notifications.
+// RunSummary contains only operational metrics and exact target identity safe
+// to pass to notifications.
 type RunSummary struct {
 	FailedPhase         string
 	BackupSize          int64
 	BackupSizeAvailable bool
 	UploadVerified      bool
+	DatabaseName        string
+	S3Bucket            string
+	S3Key               string
+	CompletedAt         time.Time
 	Total               time.Duration
 	Phases              []PhaseSummary
 }
@@ -68,6 +73,8 @@ func (r *runResult) runPhase(index int, fn func() error) bool {
 }
 
 func (r *runResult) finish() (RunSummary, error) {
-	r.summary.Total = time.Since(r.started)
+	completedAt := time.Now()
+	r.summary.CompletedAt = completedAt
+	r.summary.Total = completedAt.Sub(r.started)
 	return r.summary, r.err
 }

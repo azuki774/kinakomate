@@ -54,8 +54,8 @@ func runWithDependencies(ctx context.Context, args []string, deps backupDependen
 	result := newRunResult(time.Now())
 	parseErr := parseBackupArguments(args)
 	if errors.Is(parseErr, flag.ErrHelp) {
-		result.summary.Total = time.Since(result.started)
-		return result.summary, flag.ErrHelp
+		summary, _ := result.finish()
+		return summary, flag.ErrHelp
 	}
 	if logger == nil {
 		logger = log.New()
@@ -77,6 +77,12 @@ func runWithDependencies(ctx context.Context, args []string, deps backupDependen
 		if configErr != nil || cfg == nil {
 			return errors.New("backup configuration unavailable")
 		}
+		// Retain the exact target identity as soon as configuration is known so
+		// that storage or later failures still report the real database and
+		// object instead of re-reading the environment at notification time.
+		result.summary.DatabaseName = cfg.DBName
+		result.summary.S3Bucket = cfg.S3Bucket
+		result.summary.S3Key = cfg.S3Key
 		if err := ctx.Err(); err != nil {
 			return err
 		}

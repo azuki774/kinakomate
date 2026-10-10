@@ -88,6 +88,10 @@ func notifyBackup(summary backup.RunSummary, backupErr error) {
 		BackupSize:          summary.BackupSize,
 		BackupSizeAvailable: summary.BackupSizeAvailable,
 		UploadVerified:      summary.UploadVerified,
+		DatabaseName:        summary.DatabaseName,
+		S3Bucket:            summary.S3Bucket,
+		S3Key:               summary.S3Key,
+		CompletedAt:         summary.CompletedAt,
 		Total:               summary.Total,
 	}
 	for _, p := range summary.Phases {
