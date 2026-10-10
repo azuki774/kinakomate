@@ -58,7 +58,8 @@ GTL の DB timeout・HTTP 5xx・通信エラーは再試行します。HTTP 4xx�
 - stderr に JSON ログを出力します。`backup final report` は `preflight`／`dump`／`validate`／`upload`／`cleanup`、`restore-test final report` は `preflight`／`prepare`／`restore`／`verify`／`cleanup` の結果・所要時間をまとめます。
 - バックアップでは gzip サイズ・保存確認済みかどうかも報告します。保存後の一時ファイル削除失敗は終了コード `1` ですが、保存確認済みの状態は保持します。
 - DB パスワード・AWS 認証情報・Discord webhook URL はログに出しません。DB 接続先や S3 bucket/key は記録されるため、ログの扱いに注意してください。
-- `DISCORD_NOTIFICATION_WEBHOOK` 設定時は結果・失敗フェーズ・gzip サイズ・処理時間を通知します。復元では復元直後の DB サイズ、バックアップでは保存確認状態も含みます。DB サイズ取得や通知だけの失敗は終了コードを変更しません。
+- `DISCORD_NOTIFICATION_WEBHOOK` 設定時は結果・失敗フェーズ・gzip サイズ・処理時間を通知します。バックアップは Embed カードに DB 名・保存ファイル名（`S3_KEY` の末尾）・`s3://bucket/key`・保存確認状態・実行完了日時も表示します。成功は緑、保存確認前の失敗は赤、保存確認済みで後処理などが失敗した場合は黄です。設定取得前の失敗では対象情報を「未取得」と表示し、特殊文字は表示用にエスケープ、長い値は末尾の `…` で省略を示します。
+- バックアップの DB 名と S3 bucket/key は Discord にも送信されるため、通知先の閲覧権限に注意してください。復元通知はテキスト形式のまま、復元直後の DB サイズも含みます。DB サイズ取得や通知だけの失敗は終了コードを変更しません。
 
 ## 既存 PostgreSQL worker からの移行
 

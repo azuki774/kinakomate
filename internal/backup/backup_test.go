@@ -10,6 +10,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/azuki774/kinakomate/internal/config"
 	"github.com/azuki774/kinakomate/internal/log"
@@ -262,6 +263,43 @@ func TestRunWithDependenciesReturnsSafeConfigurationError(t *testing.T) {
 	}
 	if summary.FailedPhase != "preflight" || storeInitialized {
 		t.Fatalf("unexpected preflight result: summary=%+v initialized=%t", summary, storeInitialized)
+	}
+	if summary.DatabaseName != "" || summary.S3Bucket != "" || summary.S3Key != "" {
+		t.Fatalf("identity recorded without a loaded configuration: %+v", summary)
+	}
+}
+
+func TestRunWithDependenciesRetainsTargetIdentityAfterStorageInitializationFailure(t *testing.T) {
+	deps := defaultDependencies()
+	deps.loadConfig = func() (*config.BackupConfig, error) {
+		return testBackupConfig(), nil
+	}
+	deps.newStore = func(context.Context, *config.BackupConfig) (objectStore, error) {
+		return nil, errors.New("s3 endpoint secret")
+	}
+
+	summary, err := runWithDependencies(context.Background(), nil, deps, log.NewWithWriter(io.Discard))
+	if err == nil || summary.FailedPhase != "preflight" {
+		t.Fatalf("run result = (%+v, %v), want preflight failure", summary, err)
+	}
+	if summary.DatabaseName != "app" || summary.S3Bucket != "backup-bucket" || summary.S3Key != "backup-key-secret.sql.gz" {
+		t.Fatalf("target identity lost after storage initialization failure: %+v", summary)
+	}
+}
+
+func TestRunResultFinishDerivesTotalFromCompletionInstant(t *testing.T) {
+	started := time.Now().Add(-time.Second)
+	result := newRunResult(started)
+
+	summary, err := result.finish()
+	if err != nil {
+		t.Fatalf("finish() error = %v, want nil", err)
+	}
+	if summary.CompletedAt.IsZero() {
+		t.Fatal("finish() did not record a completion time")
+	}
+	if want := summary.CompletedAt.Sub(started); summary.Total != want {
+		t.Fatalf("Total = %v, want %v derived from the same completion instant", summary.Total, want)
 	}
 }
 

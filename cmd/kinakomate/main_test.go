@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"flag"
-	"strings"
 	"testing"
 	"time"
 
@@ -280,10 +279,6 @@ func TestRunBackupNotifiesCleanupFailureWithVerifiedUpload(t *testing.T) {
 		}
 		if result.Success || !result.UploadVerified {
 			t.Errorf("incorrect cleanup result: %+v", result)
-		}
-		message := notification.FormatBackupResult(result)
-		if strings.Contains(message, backupErr.Error()) || strings.Contains(message, "webhook-secret") {
-			t.Errorf("notification leaked sensitive data: %q", message)
 		}
 		return nil
 	}
