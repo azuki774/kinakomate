@@ -86,4 +86,15 @@ make test-backup-integration # 実イメージ・PostgreSQL・S3 を使った結
 
 `scripts/test-backup-integration.sh` は CI とローカルで共用する結合テスト専用スクリプトです。本番バックアップの実行には使いません。Docker、または `CONTAINER_ENGINE=podman make test-backup-integration` で Podman を使用し、テスト用コンテナ・ネットワークを作成して終了時に削除します。実運用の認証情報や保存先は使用しません。
 
+## 依存関係の更新
+
+[Renovate](renovate.jsonc) による通常の依存関係更新は、`Asia/Tokyo`（JST）の毎週金曜日
+20:00〜20:59 の時間枠で行います。特定の分での実行を保証するものではありません。
+通常の Renovate PR は同時に最大7件で、1時間あたりの作成数制限はありません。
+脆弱性アラートに基づく修正は、この時間枠と通常の7件制限を適用せず、即時の PR 作成を要求します。
+
+GitHub Actions の参照はコミット SHA（SHA-1）に固定し、Actions の更新だけを自動マージ対象にします。
+その他の依存関係は手動でマージします。セキュリティ更新には GitHub の dependency graph と
+Dependabot alerts の有効化、および Renovate に脆弱性アラートの読み取りと PR 作成の権限が必要です。
+
 [AI エージェント向けルール](AGENTS.md) · [Issue 一覧](https://github.com/azuki774/kinakomate/issues) · [MIT License](LICENSE)
