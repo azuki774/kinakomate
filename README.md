@@ -69,7 +69,13 @@ GTL の DB timeout・HTTP 5xx・通信エラーは再試行します。HTTP 4xx�
 
 ## 開発
 
-Go のバージョンは [go.mod](go.mod)、開発環境は [flake.nix](flake.nix) を参照してください。
+Go のバージョンは [go.mod](go.mod)、開発環境は [mise.toml](mise.toml) で管理します。mise を導入し、リポジトリ直下でツールをインストールしてください。
+
+```sh
+mise install
+```
+
+`mise activate` をシェルに設定していない場合は、`mise exec -- make ...` の形式で実行します。
 
 ```sh
 make build          # bin/kinakomate を生成
