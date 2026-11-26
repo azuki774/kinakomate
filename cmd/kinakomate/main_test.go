@@ -6,10 +6,14 @@ import (
 	"encoding/json"
 	"errors"
 	"flag"
+	"io"
+	"os"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/azuki774/kinakomate/internal/backup"
+	"github.com/azuki774/kinakomate/internal/federation"
 	"github.com/azuki774/kinakomate/internal/notification"
 	"github.com/azuki774/kinakomate/internal/restore"
 )
@@ -319,5 +323,89 @@ func TestRunBackupSkipsHelpNotificationAndIgnoresNotificationFailure(t *testing.
 	}
 	if notifications != 1 {
 		t.Fatalf("notifications = %d, want 1", notifications)
+	}
+}
+
+func captureStdout(t *testing.T, fn func()) string {
+	t.Helper()
+	previous := os.Stdout
+	reader, writer, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pipe: %v", err)
+	}
+	os.Stdout = writer
+	defer func() { os.Stdout = previous }()
+	fn()
+	if err := writer.Close(); err != nil {
+		t.Fatalf("close writer: %v", err)
+	}
+	output, err := io.ReadAll(reader)
+	if err != nil {
+		t.Fatalf("read stdout: %v", err)
+	}
+	return string(output)
+}
+
+func TestRunUsageMentionsFederationReport(t *testing.T) {
+	err := run(context.Background(), nil)
+	if err == nil {
+		t.Fatal("run without a command succeeded")
+	}
+	if !strings.Contains(err.Error(), "federation-report") {
+		t.Fatalf("usage does not list federation-report: %v", err)
+	}
+}
+
+func TestRunHelpListsFederationReport(t *testing.T) {
+	output := captureStdout(t, func() {
+		if err := run(context.Background(), []string{"help"}); err != nil {
+			t.Errorf("help failed: %v", err)
+		}
+	})
+	if !strings.Contains(output, "federation-report") {
+		t.Fatalf("help does not list federation-report: %q", output)
+	}
+}
+
+func TestRunFederationReportHelpPrintsUsage(t *testing.T) {
+	oldRun := runFederationReport
+	t.Cleanup(func() { runFederationReport = oldRun })
+	runFederationReport = func(context.Context, []string) (federation.RunSummary, error) {
+		return federation.RunSummary{}, flag.ErrHelp
+	}
+
+	output := captureStdout(t, func() {
+		if err := run(context.Background(), []string{"federation-report"}); err != nil {
+			t.Errorf("federation-report help failed: %v", err)
+		}
+	})
+	for _, want := range []string{
+		"usage: kinakomate federation-report",
+		"MISSKEY_BASE_URL",
+		"FEDERATION_REPORT_OUTPUT_PATH",
+	} {
+		if !strings.Contains(output, want) {
+			t.Errorf("usage output missing %q: %q", want, output)
+		}
+	}
+}
+
+func TestRunFederationReportPropagatesErrorAndArguments(t *testing.T) {
+	oldRun := runFederationReport
+	t.Cleanup(func() { runFederationReport = oldRun })
+
+	wantErr := errors.New("federation details")
+	var gotArgs []string
+	runFederationReport = func(_ context.Context, args []string) (federation.RunSummary, error) {
+		gotArgs = args
+		return federation.RunSummary{}, wantErr
+	}
+
+	err := run(context.Background(), []string{"federation-report", "--extra"})
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("run error = %v, want %v", err, wantErr)
+	}
+	if len(gotArgs) != 1 || gotArgs[0] != "--extra" {
+		t.Fatalf("args = %v, want [--extra]", gotArgs)
 	}
 }

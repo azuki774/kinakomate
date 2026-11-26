@@ -1,13 +1,13 @@
 # kinakomate
 
-[Misskey](https://misskey-hub.net/) 系サービスの PostgreSQL バックアップを作成し、実際に復旧できることを検証する Go 製 CLI です。
-`backup` は DB を gzip 圧縮 SQL として S3 に保存し、`restore-test` は検証専用 DB に復元して API からデータを確認します。同じイメージを使いますが、実行ジョブ・DB 接続先・認証情報は分離してください。
+[Misskey](https://misskey-hub.net/) 系サービスの PostgreSQL バックアップ・復元検証と、連合先の状況レポートを提供する Go 製 CLI です。
+`backup` は DB を gzip 圧縮 SQL として S3 に保存し、`restore-test` は検証専用 DB に復元して API からデータを確認します。`federation-report` は Misskey の公開 API から連合先の状況を集計し、Markdown レポートとしてファイルに出力します。同じイメージを使いますが、実行ジョブ・DB 接続先・認証情報は分離してください。
 
 > **復元先の `misskey` データベースは毎回削除・再作成されます。本番ではなく、復元検証専用の環境で実行してください。**
 
 ## 実行
 
-コンテナは `ghcr.io/azuki774/kinakomate:<コミットSHA>`。環境変数を注入し、コンテナの引数に `backup` または `restore-test` を指定します。PostgreSQL 18 系の `pg_dump` と `psql` を同梱しています。
+コンテナは `ghcr.io/azuki774/kinakomate:<コミットSHA>`。環境変数を注入し、コンテナの引数に `backup`、`restore-test`、または `federation-report` を指定します。PostgreSQL 18 系の `pg_dump` と `psql` を同梱しています。
 設定一覧は [env.example](env.example)（必須項目・既定値・認証情報）を参照してください。ファイルの自動読み込みは行いません。
 
 ### backup
@@ -40,6 +40,32 @@ kinakomate backup
 
 CronJob・RBAC・Secret などのデプロイ定義は別のインフラリポジトリで管理します。runner は Kubernetes API から Secret を取得しません。
 
+### federation-report
+
+Misskey の公開 API だけを使い、連合先インスタンスの状況を Markdown レポートとしてファイルに出力します。DB・S3・Kubernetes・管理者 API トークンは不要で、Discord 通知も行いません。各設定の許容範囲は [env.example](env.example) を参照してください。
+
+- **必須環境変数**
+  - `MISSKEY_BASE_URL`: 対象 Misskey インスタンスの origin URL（`restore-test` と共通）
+  - `FEDERATION_REPORT_OUTPUT_PATH`: 出力する Markdown ファイルのパス
+- **オプション（任意）環境変数**
+  - `MISSKEY_FEDERATION_NEW_WINDOW_HOURS`: `firstRetrievedAt` から新規連合先とみなす期間（既定 `168` 時間＝1週間）
+  - `MISSKEY_FEDERATION_ACTIVE_WINDOW_DAYS`: `latestRequestReceivedAt` からアクティブとみなす期間（既定 `7` 日）
+  - `MISSKEY_FEDERATION_REQUEST_TIMEOUT_SECONDS`: API リクエスト1回の制限時間（既定 `10` 秒）
+
+```sh
+MISSKEY_BASE_URL=https://misskey.example \
+FEDERATION_REPORT_OUTPUT_PATH=/var/lib/kinakomate/federation-report.md \
+kinakomate federation-report
+```
+
+処理は `preflight`（引数・環境変数・出力先の確認）→ `fetch`（`POST /api/meta` と `POST /api/federation/instances` の取得・集計）→ `write`（Markdown 出力）の順です。`/api/federation/instances` は `limit: 100`・`sort: "+firstRetrievedAt"` でページングし、`host` で重複を排除してメモリ上で集計します。リダイレクトは追従せず、1レスポンスあたり 10 MiB、ページ数は 500 を上限とします。
+
+レポートは、対象サーバーと自サーバーのバージョン、全体サマリ（連合先総数・アクティブ数・応答なし数・停止数・ブロック数）、ソフトウェア・バージョン別のインスタンス一覧、新規連合（`notesCount` 順）、応答なしの要注意連合先（FF 関係あり優先）、FF 合計数上位の連合先で構成します（アクティブ数・ソフトウェア一覧・要注意連合先・FF 合計数上位はいずれも停止・ブロック中の連合先を除きます）。
+
+連合先が自己申告する情報は非信頼データとして扱い、`name`・`description`・連絡先・アイコン URL などの自由文は取得対象から除外します。レポートに出力する `host`・`softwareName`・`softwareVersion` も、許可された ASCII 文字以外を置換し、長さ上限を超える値は末尾を `...` に省略（空値は `unknown`）したうえでインラインコードとして出力するため、Markdown リンクや HTML として解釈されません。
+
+出力先と同じディレクトリに一時ファイルを作成して書き込み、成功後に rename することで、既存ファイルを原子的に置き換えます。ファイル権限は `0644` です。途中で失敗しても不完全な内容は残らないため、親ディレクトリだけ事前に用意してください。レポートには連合先の host など外部由来の情報が含まれるため、保存先と配布範囲に注意してください。
+
 ## 復元検証の流れ
 
 1. 設定・接続を確認し、S3 の固定キーからダンプを取得して gzip を検証。
@@ -54,12 +80,12 @@ GTL の DB timeout・HTTP 5xx・通信エラーは再試行します。HTTP 4xx�
 
 ## 結果の確認
 
-- 終了コードは成功時 `0`、入力・復元・検証・後処理などの失敗時 `1`。
-- stderr に JSON ログを出力します。`backup final report` は `preflight`／`dump`／`validate`／`upload`／`cleanup`、`restore-test final report` は `preflight`／`prepare`／`restore`／`verify`／`cleanup` の結果・所要時間をまとめます。
+- 終了コードは成功時 `0`、入力・バックアップ・復元・連合レポート・後処理などの失敗時 `1`。
+- stderr に JSON ログを出力します。`backup final report` は `preflight`／`dump`／`validate`／`upload`／`cleanup`、`restore-test final report` は `preflight`／`prepare`／`restore`／`verify`／`cleanup`、`federation-report final report` は `preflight`／`fetch`／`write` の結果・所要時間をまとめます。連合レポートの最終ログには集計件数も含みます。
 - バックアップでは gzip サイズ・保存確認済みかどうかも報告します。保存後の一時ファイル削除失敗は終了コード `1` ですが、保存確認済みの状態は保持します。
 - DB パスワード・AWS 認証情報・Discord webhook URL はログに出しません。DB 接続先や S3 bucket/key は記録されるため、ログの扱いに注意してください。
 - `DISCORD_NOTIFICATION_WEBHOOK` 設定時は結果・失敗フェーズ・gzip サイズ・処理時間を通知します。バックアップは Embed カードに DB 名・保存ファイル名（`S3_KEY` の末尾）・`s3://bucket/key`・保存確認状態・実行完了日時も表示します。成功は緑、保存確認前の失敗は赤、保存確認済みで後処理などが失敗した場合は黄です。設定取得前の失敗では対象情報を「未取得」と表示し、特殊文字は表示用にエスケープ、長い値は末尾の `…` で省略を示します。
-- バックアップの DB 名と S3 bucket/key は Discord にも送信されるため、通知先の閲覧権限に注意してください。復元通知はテキスト形式のまま、復元直後の DB サイズも含みます。DB サイズ取得や通知だけの失敗は終了コードを変更しません。
+- バックアップの DB 名と S3 bucket/key は Discord にも送信されるため、通知先の閲覧権限に注意してください。復元通知はテキスト形式のまま、復元直後の DB サイズも含みます。DB サイズ取得や通知だけの失敗は終了コードを変更しません。`federation-report` は Discord 通知を行いません。
 
 ## 既存 PostgreSQL worker からの移行
 
@@ -88,7 +114,7 @@ make test-backup-integration # 実イメージ・PostgreSQL・S3 を使った結
 # make docker-push  # コミットSHAタグで GHCR に push（認証が必要）
 ```
 
-ローカルでのビルド、ヘルプ表示、`backup` にクラスタは不要です。復元処理は Kubernetes の in-cluster 認証を使うため、kubeconfig でのローカル実行には対応していません。
+ローカルでのビルド、ヘルプ表示、`backup` や `federation-report` にクラスタは不要です。復元処理は Kubernetes の in-cluster 認証を使うため、kubeconfig でのローカル実行には対応していません。
 
 `scripts/test-backup-integration.sh` は CI とローカルで共用する結合テスト専用スクリプトです。本番バックアップの実行には使いません。Docker、または `CONTAINER_ENGINE=podman make test-backup-integration` で Podman を使用し、テスト用コンテナ・ネットワークを作成して終了時に削除します。実運用の認証情報や保存先は使用しません。
 

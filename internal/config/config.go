@@ -29,6 +29,24 @@ const (
 	DefaultGTLRetryTimeout = 5 * time.Minute
 )
 
+const (
+	// DefaultFederationRequestTimeout is the maximum duration of one federation
+	// API request made by the federation report.
+	DefaultFederationRequestTimeout = 10 * time.Second
+	// DefaultFederationNewWindowHours is the default lookback, in hours, used
+	// to classify federation peers as new.
+	DefaultFederationNewWindowHours = 168
+	// DefaultFederationNewWindow is DefaultFederationNewWindowHours as a
+	// duration.
+	DefaultFederationNewWindow = 168 * time.Hour
+	// DefaultFederationActiveWindowDays is the default lookback, in days, used
+	// to classify federation peers as active.
+	DefaultFederationActiveWindowDays = 7
+	// DefaultFederationActiveWindow is DefaultFederationActiveWindowDays as a
+	// duration.
+	DefaultFederationActiveWindow = 7 * 24 * time.Hour
+)
+
 // workloadNameRegexp matches a valid RFC 1123 label, which is the form
 // Kubernetes workload names take.
 var workloadNameRegexp = regexp.MustCompile(`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`)
@@ -341,4 +359,88 @@ func requiredBackupValue(name string) (string, error) {
 		return "", fmt.Errorf("required input %s is missing or empty", name)
 	}
 	return value, nil
+}
+
+// FederationReportConfig holds the validated inputs for one federation report
+// run. It is independent of the backup and restore-test settings: no database,
+// S3, or Kubernetes input is required or interpreted.
+type FederationReportConfig struct {
+	// MisskeyBaseURL is the origin of the Misskey instance to query. It is
+	// shared with restore-test via MISSKEY_BASE_URL.
+	MisskeyBaseURL string
+
+	// OutputPath is the destination file of the Markdown report.
+	OutputPath string
+
+	// RequestTimeout is the maximum duration of one federation API request.
+	RequestTimeout time.Duration
+
+	// NewWindow is the lookback used to classify federation peers as new.
+	NewWindow time.Duration
+	// NewWindowHours is NewWindow in whole hours, as configured.
+	NewWindowHours int
+
+	// ActiveWindow is the lookback used to classify federation peers as active.
+	ActiveWindow time.Duration
+	// ActiveWindowDays is ActiveWindow in whole days, as configured.
+	ActiveWindowDays int
+}
+
+// LoadFederationReportFromEnv reads and validates the federation-report input
+// contract from the environment.
+//
+// Only the federation-report variables are consulted, so settings for backup
+// and restore-test are neither required nor interpreted. Rejected numeric
+// inputs are never echoed in errors, because the environment may carry
+// operator-supplied values that must not reach logs.
+func LoadFederationReportFromEnv() (*FederationReportConfig, error) {
+	baseURL := strings.TrimSpace(os.Getenv("MISSKEY_BASE_URL"))
+	if baseURL == "" {
+		return nil, fmt.Errorf("required input MISSKEY_BASE_URL is missing or empty")
+	}
+	if err := validateMisskeyBaseURL(baseURL); err != nil {
+		return nil, err
+	}
+
+	outputPath := strings.TrimSpace(os.Getenv("FEDERATION_REPORT_OUTPUT_PATH"))
+	if outputPath == "" {
+		return nil, fmt.Errorf("required input FEDERATION_REPORT_OUTPUT_PATH is missing or empty")
+	}
+
+	requestTimeout, err := positiveSecondsFromEnv("MISSKEY_FEDERATION_REQUEST_TIMEOUT_SECONDS", DefaultFederationRequestTimeout)
+	if err != nil {
+		return nil, err
+	}
+
+	newWindowHours := DefaultFederationNewWindowHours
+	newWindow := DefaultFederationNewWindow
+	if raw := strings.TrimSpace(os.Getenv("MISSKEY_FEDERATION_NEW_WINDOW_HOURS")); raw != "" {
+		hours, parseErr := strconv.Atoi(raw)
+		if parseErr != nil || hours < 1 || hours > 8760 {
+			return nil, fmt.Errorf("MISSKEY_FEDERATION_NEW_WINDOW_HOURS must be an integer from 1 through 8760")
+		}
+		newWindowHours = hours
+		newWindow = time.Duration(hours) * time.Hour
+	}
+
+	activeWindowDays := DefaultFederationActiveWindowDays
+	activeWindow := DefaultFederationActiveWindow
+	if raw := strings.TrimSpace(os.Getenv("MISSKEY_FEDERATION_ACTIVE_WINDOW_DAYS")); raw != "" {
+		days, parseErr := strconv.Atoi(raw)
+		if parseErr != nil || days < 1 || days > 365 {
+			return nil, fmt.Errorf("MISSKEY_FEDERATION_ACTIVE_WINDOW_DAYS must be an integer from 1 through 365")
+		}
+		activeWindowDays = days
+		activeWindow = time.Duration(days) * 24 * time.Hour
+	}
+
+	return &FederationReportConfig{
+		MisskeyBaseURL:   baseURL,
+		OutputPath:       outputPath,
+		RequestTimeout:   requestTimeout,
+		NewWindow:        newWindow,
+		NewWindowHours:   newWindowHours,
+		ActiveWindow:     activeWindow,
+		ActiveWindowDays: activeWindowDays,
+	}, nil
 }
