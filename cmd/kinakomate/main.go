@@ -12,6 +12,7 @@ import (
 	"syscall"
 
 	"github.com/azuki774/kinakomate/internal/backup"
+	"github.com/azuki774/kinakomate/internal/federation"
 	"github.com/azuki774/kinakomate/internal/log"
 	"github.com/azuki774/kinakomate/internal/notification"
 	"github.com/azuki774/kinakomate/internal/restore"
@@ -23,6 +24,7 @@ const discordNotificationWebhookEnv = "DISCORD_NOTIFICATION_WEBHOOK"
 var (
 	runBackup               = backup.RunWithSummary
 	runRestoreTest          = restore.RunWithSummary
+	runFederationReport     = federation.RunWithSummary
 	sendBackupNotification  = notification.SendBackupResult
 	sendRestoreNotification = notification.SendRestoreResult
 )
@@ -44,7 +46,7 @@ func logCommandError(w io.Writer, err error) {
 
 func run(ctx context.Context, args []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("usage: kinakomate <command> [flags]\ncommands:\n  backup         create and verify a PostgreSQL backup\n  restore-test   run the database restore verification test")
+		return fmt.Errorf("usage: kinakomate <command> [flags]\ncommands:\n  backup             create and verify a PostgreSQL backup\n  restore-test       run the database restore verification test\n  federation-report  collect federation statistics into a Markdown report")
 	}
 
 	switch args[0] {
@@ -66,11 +68,22 @@ func run(ctx context.Context, args []string) error {
 			notifyRestoreTest(summary, err)
 		}
 		return err
+	case "federation-report":
+		_, err := runFederationReport(ctx, args[1:])
+		if errors.Is(err, flag.ErrHelp) {
+			fmt.Println("usage: kinakomate federation-report")
+			fmt.Println("Collect Misskey federation instance statistics and write a Markdown report.")
+			fmt.Println("Required environment: MISSKEY_BASE_URL FEDERATION_REPORT_OUTPUT_PATH")
+			fmt.Println("Optional environment: MISSKEY_FEDERATION_REQUEST_TIMEOUT_SECONDS MISSKEY_FEDERATION_NEW_WINDOW_HOURS MISSKEY_FEDERATION_ACTIVE_WINDOW_DAYS")
+			return nil
+		}
+		return err
 	case "help", "--help", "-h":
 		fmt.Println("usage: kinakomate <command> [flags]")
 		fmt.Println("commands:")
-		fmt.Println("  backup         create and verify a PostgreSQL backup")
-		fmt.Println("  restore-test   run the database restore verification test")
+		fmt.Println("  backup             create and verify a PostgreSQL backup")
+		fmt.Println("  restore-test       run the database restore verification test")
+		fmt.Println("  federation-report  collect federation statistics into a Markdown report")
 		return nil
 	default:
 		return fmt.Errorf("unknown command: %s", args[0])
